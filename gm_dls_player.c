@@ -16,6 +16,12 @@
 #define DEFAULT_SAMPLE_RATE 44100u
 #define DEFAULT_PITCH_BEND_RANGE_SEMITONES 2.0
 
+#define CONN_SRC_NONE 0x000
+#define CONN_DST_EG1_ATTACKTIME 0x206
+#define CONN_DST_EG1_DECAYTIME 0x207
+#define CONN_DST_EG1_RELEASETIME 0x209
+#define CONN_DST_EG1_SUSTAINLEVEL 0x20A
+
 typedef struct {
     uint8_t attack_shift;
     uint8_t decay_shift;
@@ -85,9 +91,22 @@ typedef struct {
 } dls_region_t;
 
 typedef struct {
+    bool has_eg1;
+    bool has_attack;
+    bool has_decay;
+    bool has_release;
+    bool has_sustain;
+    int32_t attack_time;
+    int32_t decay_time;
+    int32_t release_time;
+    int32_t sustain_level;
+} dls_articulation_t;
+
+typedef struct {
     uint32_t bank;
     uint32_t program;
     char name[64];
+    dls_articulation_t articulation;
     dls_region_t *regions;
     size_t region_count;
     size_t region_capacity;
@@ -146,6 +165,7 @@ typedef struct {
     bool active;
     bool percussion;
     bool sustained;
+    bool use_dls_env;
     uint8_t channel;
     uint8_t note;
     uint8_t velocity;
@@ -158,11 +178,18 @@ typedef struct {
 
     const dls_region_t *region;
     const dls_wave_t *wave;
+    dls_articulation_t articulation;
     double position;
     double step;
     double attenuation_gain;
+    double amp_env;
+    double amp_sustain;
+    double amp_attack_step;
+    double amp_decay_coef;
+    double amp_release_coef;
     double percussion_gain;
     double percussion_decay;
+    uint8_t amp_stage;
 } synth_voice_t;
 
 typedef struct {
@@ -178,6 +205,13 @@ typedef struct {
     uint32_t sample_rate;
     uint32_t frames_written;
 } wav_writer_t;
+
+enum {
+    AMP_ATTACK,
+    AMP_DECAY,
+    AMP_SUSTAIN,
+    AMP_RELEASE,
+};
 
 static uint16_t rd_u16le(const uint8_t *p) {
     return (uint16_t) p[0] | ((uint16_t) p[1] << 8);
@@ -396,6 +430,63 @@ static void parse_info_name(const uint8_t *file, size_t file_size, size_t info_o
     }
 }
 
+static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, dls_articulation_t *articulation) {
+    if (lart_off + 12 > file_size || !fourcc_is(file + lart_off, "LIST")) return;
+    uint32_t list_size = rd_u32le(file + lart_off + 4);
+    size_t data_off = lart_off + 8u;
+    size_t end = data_off + list_size;
+    if (end > file_size || list_size < 4 || !fourcc_is(file + data_off, "lart")) return;
+
+    for (size_t off = data_off + 4u; off + 8u <= end;) {
+        uint32_t size = rd_u32le(file + off + 4);
+        size_t payload = off + 8u;
+        size_t next = riff_next(off, size);
+        if (payload + size > file_size || payload + size > end || next <= off) return;
+
+        if (fourcc_is(file + off, "art1") && size >= 8) {
+            uint32_t connection_count = rd_u32le(file + payload + 4);
+            size_t connection_off = payload + 8u;
+            size_t connection_end = payload + size;
+            for (uint32_t i = 0; i < connection_count && connection_off + 12u <= connection_end; ++i) {
+                uint16_t source = rd_u16le(file + connection_off);
+                uint16_t control = rd_u16le(file + connection_off + 2);
+                uint16_t destination = rd_u16le(file + connection_off + 4);
+                int32_t scale = rd_i32le(file + connection_off + 8);
+                connection_off += 12u;
+
+                if (source != CONN_SRC_NONE || control != CONN_SRC_NONE) continue;
+
+                switch (destination) {
+                    case CONN_DST_EG1_ATTACKTIME:
+                        articulation->attack_time = scale;
+                        articulation->has_attack = true;
+                        articulation->has_eg1 = true;
+                        break;
+                    case CONN_DST_EG1_DECAYTIME:
+                        articulation->decay_time = scale;
+                        articulation->has_decay = true;
+                        articulation->has_eg1 = true;
+                        break;
+                    case CONN_DST_EG1_RELEASETIME:
+                        articulation->release_time = scale;
+                        articulation->has_release = true;
+                        articulation->has_eg1 = true;
+                        break;
+                    case CONN_DST_EG1_SUSTAINLEVEL:
+                        articulation->sustain_level = scale;
+                        articulation->has_sustain = true;
+                        articulation->has_eg1 = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+
+        off = next;
+    }
+}
+
 static bool parse_instrument(const uint8_t *file, size_t file_size, size_t ins_off, dls_bank_t *bank) {
     if (ins_off + 12 > file_size || !fourcc_is(file + ins_off, "LIST")) return false;
     uint32_t list_size = rd_u32le(file + ins_off + 4);
@@ -436,6 +527,8 @@ static bool parse_instrument(const uint8_t *file, size_t file_size, size_t ins_o
             }
         } else if (fourcc_is(file + off, "LIST") && size >= 4 && fourcc_is(file + payload, "INFO")) {
             parse_info_name(file, file_size, off, instrument.name);
+        } else if (fourcc_is(file + off, "LIST") && size >= 4 && fourcc_is(file + payload, "lart")) {
+            parse_lart(file, file_size, off, &instrument.articulation);
         }
 
         off = next;
@@ -894,6 +987,26 @@ static double dls_attenuation_gain(int32_t attenuation) {
     return pow(10.0, (double) attenuation / (655360.0 * 20.0));
 }
 
+static double dls_timecents_to_seconds(int32_t timecents_16_16) {
+    if (timecents_16_16 <= INT32_MIN + 1) return 0.0;
+    double timecents = (double) timecents_16_16 / 65536.0;
+    if (timecents < -12000.0) return 0.0;
+    if (timecents > 12000.0) timecents = 12000.0;
+    return pow(2.0, timecents / 1200.0);
+}
+
+static double dls_sustain_to_gain(int32_t sustain_16_16) {
+    double sustain = (double) sustain_16_16 / 65536.0;
+    if (sustain < 0.0) sustain = 0.0;
+    if (sustain > 1000.0) sustain = 1000.0;
+    return sustain / 1000.0;
+}
+
+static double decay_coef_for_seconds(double seconds, uint32_t sample_rate) {
+    if (seconds <= 0.0) return 0.0;
+    return pow(0.001, 1.0 / (seconds * (double) sample_rate));
+}
+
 static double wave_read_channel(const dls_wave_t *wave, uint32_t frame, uint16_t channel) {
     if (frame >= wave->frame_count) return 0.0;
     if (channel >= wave->channels) channel = 0;
@@ -1032,6 +1145,10 @@ static double percussion_decay_seconds(uint8_t note) {
 static void synth_release_voice(synth_voice_t *voice) {
     if (!voice->active || voice->percussion) return;
     voice->sustained = false;
+    if (voice->use_dls_env) {
+        voice->amp_stage = AMP_RELEASE;
+        return;
+    }
     voice->attack_target = 0;
     voice->sustain_level = 0;
     voice->decay_shift = 2;
@@ -1048,6 +1165,24 @@ static void synth_note_off(synth_t *synth, uint8_t channel_index, uint8_t note) 
             synth_release_voice(voice);
         }
     }
+}
+
+static void synth_init_dls_envelope(synth_voice_t *voice, const dls_articulation_t *articulation,
+                                    uint32_t sample_rate) {
+    voice->use_dls_env = articulation->has_eg1;
+    if (!voice->use_dls_env) return;
+
+    voice->articulation = *articulation;
+    double attack_seconds = articulation->has_attack ? dls_timecents_to_seconds(articulation->attack_time) : 0.0;
+    double decay_seconds = articulation->has_decay ? dls_timecents_to_seconds(articulation->decay_time) : 0.0;
+    double release_seconds = articulation->has_release ? dls_timecents_to_seconds(articulation->release_time) : 0.05;
+    voice->amp_sustain = articulation->has_sustain ? dls_sustain_to_gain(articulation->sustain_level) : 1.0;
+
+    voice->amp_env = attack_seconds <= 0.0 ? 1.0 : 0.0;
+    voice->amp_stage = attack_seconds <= 0.0 ? AMP_DECAY : AMP_ATTACK;
+    voice->amp_attack_step = attack_seconds <= 0.0 ? 1.0 : 1.0 / (attack_seconds * (double) sample_rate);
+    voice->amp_decay_coef = decay_coef_for_seconds(decay_seconds, sample_rate);
+    voice->amp_release_coef = decay_coef_for_seconds(release_seconds, sample_rate);
 }
 
 static void synth_all_notes_off(synth_t *synth, uint8_t channel_index, bool immediate) {
@@ -1113,6 +1248,15 @@ static void synth_note_on(synth_t *synth, uint8_t channel_index, uint8_t note, u
         voice->percussion_gain = 1.0;
         voice->percussion_decay = pow(0.001, 1.0 / ((double) synth->sample_rate * percussion_decay_seconds(note)));
     } else {
+        synth_init_dls_envelope(voice, &instrument->articulation, synth->sample_rate);
+        if (voice->use_dls_env) {
+            voice->env_level = velocity;
+            voice->attack_target = 0;
+            voice->sustain_level = 0;
+            voice->decay_shift = 0;
+            return;
+        }
+
         const gm_envelope_t *env = &gm_envelopes[program & 127u];
         voice->sustain_level = (uint8_t) (((uint32_t) velocity * env->sustain_level) / 255u);
         if (env->attack_shift) {
@@ -1273,7 +1417,39 @@ static void synth_render_one(synth_t *synth, double *left, double *right) {
         synth_voice_t *voice = &synth->voices[i];
         if (!voice->active) continue;
 
-        if ((voice->age & 255u) == 0 && !voice->percussion) {
+        if (voice->use_dls_env) {
+            switch (voice->amp_stage) {
+                case AMP_ATTACK:
+                    voice->amp_env += voice->amp_attack_step;
+                    if (voice->amp_env >= 1.0) {
+                        voice->amp_env = 1.0;
+                        voice->amp_stage = AMP_DECAY;
+                    }
+                    break;
+                case AMP_DECAY:
+                    if (voice->amp_env > voice->amp_sustain) {
+                        voice->amp_env = voice->amp_sustain + (voice->amp_env - voice->amp_sustain) * voice->amp_decay_coef;
+                        if (voice->amp_env <= voice->amp_sustain + 0.0001) {
+                            voice->amp_env = voice->amp_sustain;
+                            voice->amp_stage = AMP_SUSTAIN;
+                        }
+                    } else {
+                        voice->amp_env = voice->amp_sustain;
+                        voice->amp_stage = AMP_SUSTAIN;
+                    }
+                    break;
+                case AMP_RELEASE:
+                    voice->amp_env *= voice->amp_release_coef;
+                    if (voice->amp_env < 0.0001) {
+                        voice->active = false;
+                        continue;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            voice->env_level = (uint8_t) lrint(fmin(127.0, fmax(0.0, voice->amp_env * (double) voice->velocity)));
+        } else if ((voice->age & 255u) == 0 && !voice->percussion) {
             if (voice->attack_target) {
                 uint8_t target = voice->attack_target;
                 uint8_t delta = (uint8_t) (target - voice->env_level);
@@ -1299,7 +1475,9 @@ static void synth_render_one(synth_t *synth, double *left, double *right) {
         double sample = wave_sample_mono(voice->wave, voice->position);
         midi_channel_t *channel = &synth->channels[voice->channel];
         double channel_gain = ((double) channel->volume / 127.0) * ((double) channel->expression / 127.0);
-        double env_gain = (double) voice->env_level / 127.0;
+        double env_gain = voice->use_dls_env
+                              ? ((double) voice->velocity / 127.0) * voice->amp_env
+                              : (double) voice->env_level / 127.0;
         double gain = env_gain * channel_gain * voice->attenuation_gain;
         if (voice->percussion) gain *= voice->percussion_gain;
         double pan = (double) channel->pan / 127.0;
