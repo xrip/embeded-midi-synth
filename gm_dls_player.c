@@ -14,7 +14,7 @@
 #define MAX_VOICES 96
 #define MIDI_CHANNELS 16
 #define DEFAULT_SAMPLE_RATE 44100u
-#define PITCH_BEND_RANGE_SEMITONES 12.0
+#define DEFAULT_PITCH_BEND_RANGE_SEMITONES 2.0
 
 typedef struct {
     uint8_t attack_shift;
@@ -136,6 +136,9 @@ typedef struct {
     uint8_t bank_msb;
     uint8_t bank_lsb;
     int pitch_bend;
+    double pitch_bend_range;
+    uint8_t rpn_msb;
+    uint8_t rpn_lsb;
     bool sustain;
 } midi_channel_t;
 
@@ -933,6 +936,9 @@ static void synth_init(synth_t *synth, const dls_bank_t *bank, uint32_t sample_r
         synth->channels[i].expression = 127;
         synth->channels[i].pan = 64;
         synth->channels[i].pitch_bend = 8192;
+        synth->channels[i].pitch_bend_range = DEFAULT_PITCH_BEND_RANGE_SEMITONES;
+        synth->channels[i].rpn_msb = 127;
+        synth->channels[i].rpn_lsb = 127;
     }
 }
 
@@ -962,7 +968,7 @@ static double channel_pitch_bend_semitones(const midi_channel_t *channel) {
     double centered = ((double) channel->pitch_bend - 8192.0) / 8192.0;
     if (centered < -1.0) centered = -1.0;
     if (centered > 1.0) centered = 1.0;
-    return centered * PITCH_BEND_RANGE_SEMITONES;
+    return centered * channel->pitch_bend_range;
 }
 
 static double percussion_decay_seconds(uint8_t note) {
@@ -1136,6 +1142,17 @@ static void synth_apply_pitch_to_channel(synth_t *synth, uint8_t channel_index) 
     }
 }
 
+static bool channel_uses_pitch_bend_range_rpn(const midi_channel_t *channel) {
+    return channel->rpn_msb == 0 && channel->rpn_lsb == 0;
+}
+
+static void synth_set_pitch_bend_range(synth_t *synth, uint8_t channel_index, double semitones) {
+    if (semitones < 0.0) semitones = 0.0;
+    if (semitones > 127.99) semitones = 127.99;
+    synth->channels[channel_index].pitch_bend_range = semitones;
+    synth_apply_pitch_to_channel(synth, channel_index);
+}
+
 static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
     if (event->type != MIDI_EVENT_CHANNEL) return;
     uint8_t status = event->status & 0xf0u;
@@ -1170,6 +1187,20 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
                 case 0x0b:
                     channel->expression = event->data2 & 0x7f;
                     break;
+                case 0x06:
+                    if (channel_uses_pitch_bend_range_rpn(channel)) {
+                        double cents = channel->pitch_bend_range - floor(channel->pitch_bend_range);
+                        synth_set_pitch_bend_range(synth, channel_index, (double) (event->data2 & 0x7f) + cents);
+                    }
+                    break;
+                case 0x26:
+                    if (channel_uses_pitch_bend_range_rpn(channel)) {
+                        double whole = floor(channel->pitch_bend_range);
+                        uint8_t cents = event->data2 & 0x7f;
+                        if (cents > 99) cents = 99;
+                        synth_set_pitch_bend_range(synth, channel_index, whole + (double) cents / 100.0);
+                    }
+                    break;
                 case 0x40:
                     if (event->data2 >= 64) {
                         channel->sustain = true;
@@ -1193,10 +1224,30 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
                     channel->bank_msb = 0;
                     channel->bank_lsb = 0;
                     channel->pitch_bend = 8192;
+                    channel->pitch_bend_range = DEFAULT_PITCH_BEND_RANGE_SEMITONES;
+                    channel->rpn_msb = 127;
+                    channel->rpn_lsb = 127;
                     channel->sustain = false;
+                    synth_apply_pitch_to_channel(synth, channel_index);
                     break;
                 case 0x7b:
                     synth_all_notes_off(synth, channel_index, false);
+                    break;
+                case 0x60:
+                    if (channel_uses_pitch_bend_range_rpn(channel)) {
+                        synth_set_pitch_bend_range(synth, channel_index, floor(channel->pitch_bend_range) + 1.0);
+                    }
+                    break;
+                case 0x61:
+                    if (channel_uses_pitch_bend_range_rpn(channel)) {
+                        synth_set_pitch_bend_range(synth, channel_index, floor(channel->pitch_bend_range) - 1.0);
+                    }
+                    break;
+                case 0x64:
+                    channel->rpn_lsb = event->data2 & 0x7f;
+                    break;
+                case 0x65:
+                    channel->rpn_msb = event->data2 & 0x7f;
                     break;
                 default:
                     break;
