@@ -17,10 +17,19 @@
 #define DEFAULT_PITCH_BEND_RANGE_SEMITONES 2.0
 
 #define CONN_SRC_NONE 0x000
+#define CONN_SRC_LFO 0x001
+#define CONN_SRC_CC1 0x081
+#define CONN_DST_PITCH 0x003
+#define CONN_DST_CHORUS 0x080
+#define CONN_DST_REVERB 0x081
+#define CONN_DST_LFO_FREQUENCY 0x104
+#define CONN_DST_LFO_STARTDELAY 0x105
 #define CONN_DST_EG1_ATTACKTIME 0x206
 #define CONN_DST_EG1_DECAYTIME 0x207
 #define CONN_DST_EG1_RELEASETIME 0x209
 #define CONN_DST_EG1_SUSTAINLEVEL 0x20A
+#define CONN_DST_FILTER_CUTOFF 0x500
+#define CONN_DST_FILTER_Q 0x501
 
 typedef struct {
     uint8_t attack_shift;
@@ -96,10 +105,22 @@ typedef struct {
     bool has_decay;
     bool has_release;
     bool has_sustain;
+    bool has_lfo_frequency;
+    bool has_lfo_delay;
+    bool has_filter_cutoff;
+    bool has_filter_q;
     int32_t attack_time;
     int32_t decay_time;
     int32_t release_time;
     int32_t sustain_level;
+    int32_t lfo_frequency;
+    int32_t lfo_delay;
+    int32_t filter_cutoff;
+    int32_t filter_q;
+    int32_t reverb_send;
+    int32_t chorus_send;
+    double lfo_pitch_cents;
+    double mod_lfo_pitch_cents;
 } dls_articulation_t;
 
 typedef struct {
@@ -152,6 +173,9 @@ typedef struct {
     uint8_t volume;
     uint8_t expression;
     uint8_t pan;
+    uint8_t modulation;
+    uint8_t reverb;
+    uint8_t chorus;
     uint8_t bank_msb;
     uint8_t bank_lsb;
     int pitch_bend;
@@ -187,6 +211,16 @@ typedef struct {
     double amp_attack_step;
     double amp_decay_coef;
     double amp_release_coef;
+    double lfo_phase;
+    double lfo_delay_samples;
+    double lfo_frequency_hz;
+    double lfo_pitch_cents;
+    double mod_lfo_pitch_cents;
+    bool filter_enabled;
+    double filter_f;
+    double filter_damp;
+    double filter_low;
+    double filter_band;
     double percussion_gain;
     double percussion_decay;
     uint8_t amp_stage;
@@ -198,6 +232,15 @@ typedef struct {
     midi_channel_t channels[MIDI_CHANNELS];
     synth_voice_t voices[MAX_VOICES];
     uint64_t next_age;
+    double *reverb_l;
+    double *reverb_r;
+    size_t reverb_len;
+    size_t reverb_pos;
+    double *chorus_l;
+    double *chorus_r;
+    size_t chorus_len;
+    size_t chorus_pos;
+    double chorus_phase;
 } synth_t;
 
 typedef struct {
@@ -454,31 +497,59 @@ static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, d
                 int32_t scale = rd_i32le(file + connection_off + 8);
                 connection_off += 12u;
 
-                if (source != CONN_SRC_NONE || control != CONN_SRC_NONE) continue;
-
-                switch (destination) {
-                    case CONN_DST_EG1_ATTACKTIME:
-                        articulation->attack_time = scale;
-                        articulation->has_attack = true;
-                        articulation->has_eg1 = true;
-                        break;
-                    case CONN_DST_EG1_DECAYTIME:
-                        articulation->decay_time = scale;
-                        articulation->has_decay = true;
-                        articulation->has_eg1 = true;
-                        break;
-                    case CONN_DST_EG1_RELEASETIME:
-                        articulation->release_time = scale;
-                        articulation->has_release = true;
-                        articulation->has_eg1 = true;
-                        break;
-                    case CONN_DST_EG1_SUSTAINLEVEL:
-                        articulation->sustain_level = scale;
-                        articulation->has_sustain = true;
-                        articulation->has_eg1 = true;
-                        break;
-                    default:
-                        break;
+                if (source == CONN_SRC_NONE && control == CONN_SRC_NONE) {
+                    switch (destination) {
+                        case CONN_DST_LFO_FREQUENCY:
+                            articulation->lfo_frequency = scale;
+                            articulation->has_lfo_frequency = true;
+                            break;
+                        case CONN_DST_LFO_STARTDELAY:
+                            articulation->lfo_delay = scale;
+                            articulation->has_lfo_delay = true;
+                            break;
+                        case CONN_DST_EG1_ATTACKTIME:
+                            articulation->attack_time = scale;
+                            articulation->has_attack = true;
+                            articulation->has_eg1 = true;
+                            break;
+                        case CONN_DST_EG1_DECAYTIME:
+                            articulation->decay_time = scale;
+                            articulation->has_decay = true;
+                            articulation->has_eg1 = true;
+                            break;
+                        case CONN_DST_EG1_RELEASETIME:
+                            articulation->release_time = scale;
+                            articulation->has_release = true;
+                            articulation->has_eg1 = true;
+                            break;
+                        case CONN_DST_EG1_SUSTAINLEVEL:
+                            articulation->sustain_level = scale;
+                            articulation->has_sustain = true;
+                            articulation->has_eg1 = true;
+                            break;
+                        case CONN_DST_FILTER_CUTOFF:
+                            articulation->filter_cutoff = scale;
+                            articulation->has_filter_cutoff = true;
+                            break;
+                        case CONN_DST_FILTER_Q:
+                            articulation->filter_q = scale;
+                            articulation->has_filter_q = true;
+                            break;
+                        case CONN_DST_REVERB:
+                            articulation->reverb_send = scale;
+                            break;
+                        case CONN_DST_CHORUS:
+                            articulation->chorus_send = scale;
+                            break;
+                        default:
+                            break;
+                    }
+                } else if (source == CONN_SRC_LFO && destination == CONN_DST_PITCH) {
+                    if (control == CONN_SRC_NONE) {
+                        articulation->lfo_pitch_cents += (double) scale / 65536.0;
+                    } else if (control == CONN_SRC_CC1) {
+                        articulation->mod_lfo_pitch_cents += (double) scale / 65536.0;
+                    }
                 }
             }
         }
@@ -995,6 +1066,13 @@ static double dls_timecents_to_seconds(int32_t timecents_16_16) {
     return pow(2.0, timecents / 1200.0);
 }
 
+static double dls_absolute_cents_to_hz(int32_t cents_16_16) {
+    double cents = (double) cents_16_16 / 65536.0;
+    if (cents < -12000.0) cents = -12000.0;
+    if (cents > 16000.0) cents = 16000.0;
+    return 8.176 * pow(2.0, cents / 1200.0);
+}
+
 static double dls_sustain_to_gain(int32_t sustain_16_16) {
     double sustain = (double) sustain_16_16 / 65536.0;
     if (sustain < 0.0) sustain = 0.0;
@@ -1005,6 +1083,12 @@ static double dls_sustain_to_gain(int32_t sustain_16_16) {
 static double decay_coef_for_seconds(double seconds, uint32_t sample_rate) {
     if (seconds <= 0.0) return 0.0;
     return pow(0.001, 1.0 / (seconds * (double) sample_rate));
+}
+
+static double clamp_double(double value, double min_value, double max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
 }
 
 static double wave_read_channel(const dls_wave_t *wave, uint32_t frame, uint16_t channel) {
@@ -1048,11 +1132,36 @@ static void synth_init(synth_t *synth, const dls_bank_t *bank, uint32_t sample_r
         synth->channels[i].volume = 100;
         synth->channels[i].expression = 127;
         synth->channels[i].pan = 64;
+        synth->channels[i].modulation = 0;
+        synth->channels[i].reverb = 0;
+        synth->channels[i].chorus = 0;
         synth->channels[i].pitch_bend = 8192;
         synth->channels[i].pitch_bend_range = DEFAULT_PITCH_BEND_RANGE_SEMITONES;
         synth->channels[i].rpn_msb = 127;
         synth->channels[i].rpn_lsb = 127;
     }
+
+    synth->reverb_len = sample_rate / 2u;
+    if (synth->reverb_len < 1) synth->reverb_len = 1;
+    synth->chorus_len = sample_rate / 20u;
+    if (synth->chorus_len < 8) synth->chorus_len = 8;
+    synth->reverb_l = calloc(synth->reverb_len, sizeof(*synth->reverb_l));
+    synth->reverb_r = calloc(synth->reverb_len, sizeof(*synth->reverb_r));
+    synth->chorus_l = calloc(synth->chorus_len, sizeof(*synth->chorus_l));
+    synth->chorus_r = calloc(synth->chorus_len, sizeof(*synth->chorus_r));
+}
+
+static void synth_free(synth_t *synth) {
+    free(synth->reverb_l);
+    free(synth->reverb_r);
+    free(synth->chorus_l);
+    free(synth->chorus_r);
+    synth->reverb_l = NULL;
+    synth->reverb_r = NULL;
+    synth->chorus_l = NULL;
+    synth->chorus_r = NULL;
+    synth->reverb_len = 0;
+    synth->chorus_len = 0;
 }
 
 static bool synth_has_active_voices(const synth_t *synth) {
@@ -1185,6 +1294,33 @@ static void synth_init_dls_envelope(synth_voice_t *voice, const dls_articulation
     voice->amp_release_coef = decay_coef_for_seconds(release_seconds, sample_rate);
 }
 
+static void synth_init_dls_modulators(synth_voice_t *voice, const dls_articulation_t *articulation,
+                                      uint32_t sample_rate) {
+    voice->lfo_pitch_cents = articulation->lfo_pitch_cents;
+    voice->mod_lfo_pitch_cents = articulation->mod_lfo_pitch_cents;
+    if (voice->lfo_pitch_cents != 0.0 || voice->mod_lfo_pitch_cents != 0.0) {
+        voice->lfo_frequency_hz = articulation->has_lfo_frequency
+                                      ? dls_absolute_cents_to_hz(articulation->lfo_frequency)
+                                      : 5.0;
+        voice->lfo_frequency_hz = clamp_double(voice->lfo_frequency_hz, 0.01, 40.0);
+        double delay_seconds = articulation->has_lfo_delay ? dls_timecents_to_seconds(articulation->lfo_delay) : 0.0;
+        voice->lfo_delay_samples = delay_seconds * (double) sample_rate;
+    }
+
+    if (articulation->has_filter_cutoff) {
+        double cutoff = dls_absolute_cents_to_hz(articulation->filter_cutoff);
+        cutoff = clamp_double(cutoff, 20.0, (double) sample_rate * 0.45);
+        voice->filter_f = 2.0 * sin(M_PI * cutoff / (double) sample_rate);
+        voice->filter_f = clamp_double(voice->filter_f, 0.001, 0.99);
+
+        double q_db = articulation->has_filter_q ? (double) articulation->filter_q / 65536.0 : 0.0;
+        double q = pow(10.0, q_db / 20.0);
+        q = clamp_double(q, 0.5, 12.0);
+        voice->filter_damp = clamp_double(1.0 / q, 0.05, 2.0);
+        voice->filter_enabled = true;
+    }
+}
+
 static void synth_all_notes_off(synth_t *synth, uint8_t channel_index, bool immediate) {
     for (int i = 0; i < MAX_VOICES; ++i) {
         synth_voice_t *voice = &synth->voices[i];
@@ -1249,6 +1385,7 @@ static void synth_note_on(synth_t *synth, uint8_t channel_index, uint8_t note, u
         voice->percussion_decay = pow(0.001, 1.0 / ((double) synth->sample_rate * percussion_decay_seconds(note)));
     } else {
         synth_init_dls_envelope(voice, &instrument->articulation, synth->sample_rate);
+        synth_init_dls_modulators(voice, &instrument->articulation, synth->sample_rate);
         if (voice->use_dls_env) {
             voice->env_level = velocity;
             voice->attack_target = 0;
@@ -1319,6 +1456,9 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
                 case 0x00:
                     channel->bank_msb = event->data2 & 0x7f;
                     break;
+                case 0x01:
+                    channel->modulation = event->data2 & 0x7f;
+                    break;
                 case 0x20:
                     channel->bank_lsb = event->data2 & 0x7f;
                     break;
@@ -1365,6 +1505,9 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
                     channel->volume = 100;
                     channel->expression = 127;
                     channel->pan = 64;
+                    channel->modulation = 0;
+                    channel->reverb = 0;
+                    channel->chorus = 0;
                     channel->bank_msb = 0;
                     channel->bank_lsb = 0;
                     channel->pitch_bend = 8192;
@@ -1393,6 +1536,12 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
                 case 0x65:
                     channel->rpn_msb = event->data2 & 0x7f;
                     break;
+                case 0x5b:
+                    channel->reverb = event->data2 & 0x7f;
+                    break;
+                case 0x5d:
+                    channel->chorus = event->data2 & 0x7f;
+                    break;
                 default:
                     break;
             }
@@ -1409,9 +1558,25 @@ static void synth_handle_event(synth_t *synth, const midi_event_t *event) {
     }
 }
 
+static double delay_read_linear(const double *buffer, size_t length, size_t write_pos, double delay_samples) {
+    if (!buffer || length == 0) return 0.0;
+    double read_pos = (double) write_pos - delay_samples;
+    while (read_pos < 0.0) read_pos += (double) length;
+    while (read_pos >= (double) length) read_pos -= (double) length;
+    size_t i0 = (size_t) read_pos;
+    size_t i1 = i0 + 1u;
+    if (i1 >= length) i1 = 0;
+    double frac = read_pos - (double) i0;
+    return buffer[i0] + (buffer[i1] - buffer[i0]) * frac;
+}
+
 static void synth_render_one(synth_t *synth, double *left, double *right) {
     double l = 0.0;
     double r = 0.0;
+    double reverb_send_l = 0.0;
+    double reverb_send_r = 0.0;
+    double chorus_send_l = 0.0;
+    double chorus_send_r = 0.0;
 
     for (int i = 0; i < MAX_VOICES; ++i) {
         synth_voice_t *voice = &synth->voices[i];
@@ -1472,8 +1637,26 @@ static void synth_render_one(synth_t *synth, double *left, double *right) {
             }
         }
 
-        double sample = wave_sample_mono(voice->wave, voice->position);
         midi_channel_t *channel = &synth->channels[voice->channel];
+        double local_step = voice->step;
+        if ((voice->lfo_pitch_cents != 0.0 || voice->mod_lfo_pitch_cents != 0.0) &&
+            (double) voice->age >= voice->lfo_delay_samples) {
+            double lfo = sin(voice->lfo_phase);
+            double pitch_cents = lfo * (voice->lfo_pitch_cents +
+                                        voice->mod_lfo_pitch_cents * ((double) channel->modulation / 127.0));
+            local_step *= pow(2.0, pitch_cents / 1200.0);
+            voice->lfo_phase += 2.0 * M_PI * voice->lfo_frequency_hz / (double) synth->sample_rate;
+            if (voice->lfo_phase >= 2.0 * M_PI) voice->lfo_phase = fmod(voice->lfo_phase, 2.0 * M_PI);
+        }
+
+        double sample = wave_sample_mono(voice->wave, voice->position);
+        if (voice->filter_enabled) {
+            voice->filter_low += voice->filter_f * voice->filter_band;
+            double high = sample - voice->filter_low - voice->filter_damp * voice->filter_band;
+            voice->filter_band += voice->filter_f * high;
+            sample = voice->filter_low;
+        }
+
         double channel_gain = ((double) channel->volume / 127.0) * ((double) channel->expression / 127.0);
         double env_gain = voice->use_dls_env
                               ? ((double) voice->velocity / 127.0) * voice->amp_env
@@ -1483,16 +1666,29 @@ static void synth_render_one(synth_t *synth, double *left, double *right) {
         double pan = (double) channel->pan / 127.0;
         double pan_l = cos(pan * M_PI * 0.5);
         double pan_r = sin(pan * M_PI * 0.5);
+        double dry_l = sample * gain * pan_l;
+        double dry_r = sample * gain * pan_r;
 
-        l += sample * gain * pan_l;
-        r += sample * gain * pan_r;
+        l += dry_l;
+        r += dry_r;
+
+        if (channel->reverb) {
+            double send = (double) channel->reverb / 127.0;
+            reverb_send_l += dry_l * send;
+            reverb_send_r += dry_r * send;
+        }
+        if (channel->chorus) {
+            double send = (double) channel->chorus / 127.0;
+            chorus_send_l += dry_l * send;
+            chorus_send_r += dry_r * send;
+        }
 
         const bool region_looped = voice->region->looped || (!voice->region->has_wsmp && voice->wave->looped);
         const uint32_t loop_start = voice->region->looped ? voice->region->loop_start : voice->wave->loop_start;
         const uint32_t loop_length = voice->region->looped ? voice->region->loop_length : voice->wave->loop_length;
         double loop_end = (double) loop_start + (double) loop_length;
 
-        voice->position += voice->step;
+        voice->position += local_step;
         if (region_looped && loop_length > 1 && loop_end <= (double) voice->wave->frame_count) {
             while (voice->position >= loop_end) {
                 voice->position = (double) loop_start + fmod(voice->position - loop_end, (double) loop_length);
@@ -1509,6 +1705,34 @@ static void synth_render_one(synth_t *synth, double *left, double *right) {
         }
 
         voice->age++;
+    }
+
+    if (synth->reverb_l && synth->reverb_r && synth->reverb_len > 0) {
+        double wet_l = synth->reverb_l[synth->reverb_pos];
+        double wet_r = synth->reverb_r[synth->reverb_pos];
+        synth->reverb_l[synth->reverb_pos] = reverb_send_l * 0.35 + wet_l * 0.52 + wet_r * 0.18;
+        synth->reverb_r[synth->reverb_pos] = reverb_send_r * 0.35 + wet_r * 0.52 + wet_l * 0.18;
+        synth->reverb_pos++;
+        if (synth->reverb_pos >= synth->reverb_len) synth->reverb_pos = 0;
+        l += wet_l * 0.28;
+        r += wet_r * 0.28;
+    }
+
+    if (synth->chorus_l && synth->chorus_r && synth->chorus_len > 0) {
+        double base_delay = (double) synth->sample_rate * 0.018;
+        double depth = (double) synth->sample_rate * 0.006;
+        double delay_l = base_delay + depth * (0.5 + 0.5 * sin(synth->chorus_phase));
+        double delay_r = base_delay + depth * (0.5 + 0.5 * sin(synth->chorus_phase + M_PI * 0.5));
+        double wet_l = delay_read_linear(synth->chorus_l, synth->chorus_len, synth->chorus_pos, delay_l);
+        double wet_r = delay_read_linear(synth->chorus_r, synth->chorus_len, synth->chorus_pos, delay_r);
+        synth->chorus_l[synth->chorus_pos] = chorus_send_l;
+        synth->chorus_r[synth->chorus_pos] = chorus_send_r;
+        synth->chorus_pos++;
+        if (synth->chorus_pos >= synth->chorus_len) synth->chorus_pos = 0;
+        synth->chorus_phase += 2.0 * M_PI * 0.35 / (double) synth->sample_rate;
+        if (synth->chorus_phase >= 2.0 * M_PI) synth->chorus_phase -= 2.0 * M_PI;
+        l += wet_l * 0.32;
+        r += wet_r * 0.32;
     }
 
     *left = l;
@@ -1642,6 +1866,7 @@ static bool render_midi_to_wav(const midi_file_t *midi, const dls_bank_t *bank,
     }
 
     bool ok = wav_writer_close(&writer);
+    synth_free(&synth);
     fprintf(stderr, "WAV: %u Hz stereo, %u frames written to %s\n",
             sample_rate, writer.frames_written, wav_path);
     return ok;
