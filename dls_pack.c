@@ -147,6 +147,7 @@ int main(int argc, char **argv) {
     }
 
     uint32_t regions_no_eg1 = 0;
+    uint32_t waves_native_rate = 0; // waves whose rate == output_rate (no resample)
     vec_t waves, regions, instruments, pcm;
     vec_init(&waves, sizeof(gm_wave_t));
     vec_init(&regions, sizeof(gm_region_t));
@@ -165,6 +166,7 @@ int main(int argc, char **argv) {
         }
         gw->frame_count = w->frame_count;
         gw->base_step_q16 = (uint32_t) llround((double) w->sample_rate / (double) output_rate * (double) GM_ONE_Q16);
+        if (w->sample_rate == output_rate) waves_native_rate++;
         for (uint32_t f = 0; f < w->frame_count; ++f) {
             double mono = 0.0;
             for (uint16_t ch = 0; ch < w->channels; ++ch) mono += wave_read_channel(w, f, ch);
@@ -281,10 +283,10 @@ int main(int argc, char **argv) {
     double pcm_mb = (double) (pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
     double total_mb = (double) (hdr.off_pcm + pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
     fprintf(stderr,
-            "GMWB: %u instruments, %u regions (%u without EG1), %u waves, %u samples "
-            "(%.2f MB PCM, %.2f MB total) @ %u Hz -> %s\n",
-            hdr.instrument_count, hdr.region_count, regions_no_eg1, hdr.wave_count, hdr.pcm_samples,
-            pcm_mb, total_mb, output_rate, out_path);
+            "GMWB: %u instruments, %u regions (%u without EG1), %u waves (%u at native %u Hz), "
+            "%u samples (%.2f MB PCM, %.2f MB total) @ %u Hz -> %s\n",
+            hdr.instrument_count, hdr.region_count, regions_no_eg1, hdr.wave_count, waves_native_rate,
+            output_rate, hdr.pcm_samples, pcm_mb, total_mb, output_rate, out_path);
 
     free(waves.data);
     free(regions.data);

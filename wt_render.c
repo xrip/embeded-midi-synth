@@ -16,7 +16,7 @@
 
 #define INLINE static inline
 #ifndef SOUND_FREQUENCY
-#define SOUND_FREQUENCY 44100
+#define SOUND_FREQUENCY 22050   // GM.DLS samples are natively 22050 Hz
 #endif
 #include "wavetable.inl"
 
