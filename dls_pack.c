@@ -170,6 +170,7 @@ int main(int argc, char **argv) {
 
     uint32_t regions_no_eg1 = 0;
     uint32_t waves_native_rate = 0; // waves whose rate == output_rate (no resample)
+    uint32_t drum_loop_total = 0, drum_loop_sustained = 0;
     vec_t waves, regions, instruments, pcm;
     vec_init(&waves, sizeof(gm_wave_t));
     vec_init(&regions, sizeof(gm_region_t));
@@ -258,9 +259,15 @@ int main(int argc, char **argv) {
                 out->flags |= GM_RGN_LOOPED;
             }
 
-            bake_eg1(&ins->articulation, (uint8_t) ins->program, output_rate, out);
-            bake_lfo(&ins->articulation, output_rate, out);
+            // DLS articulation: a region's own lart overrides the instrument's.
+            const dls_articulation_t *art = rg->has_articulation ? &rg->articulation : &ins->articulation;
+            bake_eg1(art, (uint8_t) ins->program, output_rate, out);
+            bake_lfo(art, output_rate, out);
             if (!out->has_eg1) regions_no_eg1++;
+            if ((ins->bank & DLS_DRUM_BANK) && (out->flags & GM_RGN_LOOPED)) {
+                drum_loop_total++;
+                if (out->sustain_q16 > (GM_ONE_Q16 / 20)) drum_loop_sustained++; // >5%
+            }
             region_count++;
         }
 
@@ -319,6 +326,8 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "  modulators: %u/%zu LFO vibrato (depth %.1f..%.1f cents), %u mod-wheel LFO, %u filter\n",
             ins_lfo, bank.instrument_count, lfo_min, lfo_max, ins_modlfo, ins_filter);
+    fprintf(stderr, "  drum loops: %u looped drum regions, %u of them with sustain>5%% (would ring without note-off)\n",
+            drum_loop_total, drum_loop_sustained);
 
     double pcm_mb = (double) (pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
     double total_mb = (double) (hdr.off_pcm + pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);

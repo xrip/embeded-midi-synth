@@ -56,24 +56,6 @@ typedef struct {
 } dls_wave_t;
 
 typedef struct {
-    uint16_t key_low;
-    uint16_t key_high;
-    uint16_t vel_low;
-    uint16_t vel_high;
-    uint16_t options;
-    uint16_t key_group;
-    uint32_t wave_index;
-
-    bool has_wsmp;
-    uint16_t unity_note;
-    int16_t fine_tune;
-    int32_t attenuation;
-    bool looped;
-    uint32_t loop_start;
-    uint32_t loop_length;
-} dls_region_t;
-
-typedef struct {
     bool has_eg1;
     bool has_attack;
     bool has_decay;
@@ -96,6 +78,27 @@ typedef struct {
     double lfo_pitch_cents;
     double mod_lfo_pitch_cents;
 } dls_articulation_t;
+
+typedef struct {
+    uint16_t key_low;
+    uint16_t key_high;
+    uint16_t vel_low;
+    uint16_t vel_high;
+    uint16_t options;
+    uint16_t key_group;
+    uint32_t wave_index;
+
+    bool has_wsmp;
+    uint16_t unity_note;
+    int16_t fine_tune;
+    int32_t attenuation;
+    bool looped;
+    uint32_t loop_start;
+    uint32_t loop_length;
+
+    bool has_articulation;       // region carries its own lart (overrides instrument)
+    dls_articulation_t articulation;
+} dls_region_t;
 
 typedef struct {
     uint32_t bank;
@@ -259,6 +262,8 @@ static bool parse_wsmp(const uint8_t *data, size_t size, dls_region_t *region, d
     return true;
 }
 
+static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, dls_articulation_t *articulation);
+
 static bool parse_region(const uint8_t *file, size_t file_size, size_t region_off, dls_instrument_t *instrument) {
     if (region_off + 12 > file_size || !fourcc_is(file + region_off, "LIST")) return false;
     uint32_t list_size = rd_u32le(file + region_off + 4);
@@ -293,6 +298,9 @@ static bool parse_region(const uint8_t *file, size_t file_size, size_t region_of
             if (!parse_wsmp(file + payload, size, &region, NULL)) return false;
         } else if (fourcc_is(file + off, "wlnk") && size >= 12) {
             region.wave_index = rd_u32le(file + payload + 8);
+        } else if (fourcc_is(file + off, "LIST") && size >= 4 && fourcc_is(file + payload, "lart")) {
+            parse_lart(file, file_size, off, &region.articulation);
+            region.has_articulation = true;
         }
 
         off = next;

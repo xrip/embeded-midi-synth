@@ -260,16 +260,18 @@ static wt_voice_t *wt_alloc_voice(void) {
 }
 
 static void wt_release_voice(wt_voice_t *v) {
-    if (!v->active || v->percussion) return;
+    if (!v->active) return;
     v->sustained = 0;
     v->amp_stage = WT_RELEASE;
 }
 
 static void wt_note_off(uint8_t channel, uint8_t note) {
-    if (channel == 9) return; // drums are one-shots
     for (int i = 0; i < WT_MAX_VOICES; ++i) {
         wt_voice_t *v = &g_voices[i];
         if (!v->active || v->channel != channel || v->note != note) continue;
+        // One-shot drums play to the end (ignore note-off); looped/sustained
+        // drums and all melodic voices release per their DLS envelope.
+        if (v->percussion && !v->looped) continue;
         if (g_channels[channel].sustain) v->sustained = 1;
         else wt_release_voice(v);
     }
@@ -307,7 +309,7 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     v->pcm = g_bank.pcm + w->pcm_offset;
     v->frame_count = w->frame_count;
-    if (!v->percussion && (rg->flags & GM_RGN_LOOPED)) {
+    if (rg->flags & GM_RGN_LOOPED) {  // honor DLS loop for melodic and drums alike
         v->looped = 1;
         v->loop_start = rg->loop_start;
         v->loop_end = rg->loop_start + rg->loop_length;
@@ -470,6 +472,11 @@ INLINE void wt_advance_env(wt_voice_t *v) {
                 v->env_q16 = v->sustain_q16;
                 v->amp_stage = WT_SUSTAIN;
             }
+            break;
+        case WT_SUSTAIN:
+            // A voice that decayed to (near) silence is done; free it so looped
+            // samples with zero sustain don't ring forever.
+            if (v->sustain_q16 < 8) v->active = 0;
             break;
         case WT_RELEASE:
             v->env_q16 = (int32_t) (((int64_t) v->env_q16 * v->release_coef_q16) >> 16);
