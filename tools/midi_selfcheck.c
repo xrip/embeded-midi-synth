@@ -9,9 +9,10 @@
 
 #define INLINE inline           // emulator convention: code writes `static INLINE`
 #define SOUND_FREQUENCY 22050
+#define WT_BANK_EXTERN           // skip the .incbin embed; supply a stub bank below
 #include "../general-midi.c.inl"
 
-// Stand-in for the .incbin'd bank (gm_bank.S provides the real one on device).
+// Stand-in for the embedded bank so the link resolves without the 3 MB file.
 const uint8_t gm_bank_blob[64] = {0};
 
 int main(void) {

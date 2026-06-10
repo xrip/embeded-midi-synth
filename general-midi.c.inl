@@ -41,8 +41,25 @@
 #include "wavetable.inl"   // parse_midi, midi_sample_stereo, wt_set_bank, midi_command_t
 #pragma pop_macro("INLINE")
 
-// The packed soundbank, embedded in flash by gm_bank.S (.incbin, 4-byte aligned).
-extern const uint8_t gm_bank_blob[];
+// Embed the packed soundbank in flash via inline-asm .incbin. Generate it first
+// (dls_pack gm.dls gm_bank.bin <rate>) and make it reachable by the assembler
+// (e.g. -Wa,-I<dir> on this TU, or an absolute path below). Define WT_BANK_EXTERN
+// to skip the embed and supply gm_bank_blob yourself (host self-check, a separate
+// .S/.c, etc.). See docs/device-integration.md.
+#ifndef WT_BANK_EXTERN
+#define IMPORT_BIN(file, sym) asm (\
+    ".section .rodata." #sym "\n"           /* own rodata subsection (flash) */\
+    ".balign 4\n"                           /* word alignment */\
+    ".global " #sym "\n"                    /* export the object address */\
+    #sym ":\n"                              /* define the object label */\
+    ".incbin \"" file "\"\n"                /* import the file */\
+    ".global _sizeof_" #sym "\n"            /* export the object size */\
+    ".set _sizeof_" #sym ", . - " #sym "\n" /* define the object size */\
+    ".balign 4\n"                           /* word alignment */\
+    ".section \".text\"\n")                 /* restore section */
+IMPORT_BIN("gm_bank.bin", gm_bank_blob);
+#endif
+extern const uint8_t gm_bank_blob[];        // size also available as _sizeof_gm_bank_blob
 
 static int wt_bank_ready = 0;
 

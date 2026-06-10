@@ -28,14 +28,25 @@ lazy-init. It needs nothing from the emulator beyond `INLINE` (and, optionally,
 What **you** do in the firmware build:
 1. Generate the bank for the playback rate:
    `dls_pack gm.dls gm_bank.bin 22050` (host tool, already built).
-2. Add `gm_bank.S` (provided) to the firmware target's sources; it `.incbin`s
-   `gm_bank.bin` into `.rodata` (flash) as `gm_bank_blob`. Make `gm_bank.bin`
-   reachable by the assembler (`-I<dir>` on that source, or generate it into the
-   build dir). See the comment in `gm_bank.S`.
+2. The bank is embedded by an inline-asm `IMPORT_BIN(...)` `.incbin` already in
+   `general-midi.c.inl` (no separate `.S`, no `enable_language(ASM)`). You only
+   need to make `gm_bank.bin` reachable by the assembler when that TU compiles —
+   pass the directory via `-Wa,-I`, and relink when the bank changes:
+   ```cmake
+   set_source_files_properties(emulator/audio/mpu401.c.inl PROPERTIES
+       COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/emulator/audio"
+       OBJECT_DEPENDS  "${CMAKE_CURRENT_SOURCE_DIR}/emulator/audio/gm_bank.bin")
+   ```
+   (`mpu401.c.inl` is the TU that includes `general-midi.c.inl`; adjust to whatever
+   `.c` actually compiles it. Alternatively put an absolute path in the
+   `IMPORT_BIN("gm_bank.bin", ...)` call.)
 3. **Flash size**: the bank is ~3 MB; ensure the board/linker allows it
    (`PICO_FLASH_SIZE_BYTES` / a >=4 MB flash). Default Pico is 2 MB — too small.
 4. Build, flash, play. The `constructor` calls `wt_set_bank(gm_bank_blob)` before
    `main`; audio comes out mono via the existing `midi_sample()` caller.
+
+To supply the bank some other way (separate `.c`/`.S`, or the host self-check),
+define `WT_BANK_EXTERN` before the include and provide `gm_bank_blob` yourself.
 
 Sanity: it should sound like the host `wt_render` output (mono sum).
 
