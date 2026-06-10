@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
     while (tail-- && wt_has_active_voices()) render_block(&wav, 1);
 
     int ok = wav_close(&wav);
-    fprintf(stderr, "WT: %u Hz stereo, %u frames -> %s\n", sample_rate, wav.frames, wav_path);
+    fprintf(stderr, "WT: %u Hz stereo, %u frames, WT_BLOCK=%d -> %s\n", sample_rate, wav.frames, WT_BLOCK, wav_path);
     fprintf(stderr, "VOICES peak=%d avg=%.1f\n", g_probe_max, g_probe_n ? (double) g_probe_sum / g_probe_n : 0.0);
     midi_file_free(&midi);
     free_file_blob(&bank_blob);

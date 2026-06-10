@@ -24,6 +24,15 @@
 #ifndef WT_MAX_VOICES
 #define WT_MAX_VOICES 32
 #endif
+// Control rate: the int64-heavy pitch/LFO/EG2 modulation is refreshed once per
+// WT_BLOCK output samples instead of per sample (only for voices that carry an
+// LFO or EG2). Must be a power of two. 8 @ 22050 Hz ~= 2.8 kHz, far above any
+// vibrato/tremolo rate, so the held pitch step only adds sub-cent phase drift
+// (A/B vs per-sample: <= -42 dBFS on the worst real track); the amplitude
+// envelope still runs per sample, so there is no zipper.
+#ifndef WT_BLOCK
+#define WT_BLOCK 8
+#endif
 #define WT_MIDI_CHANNELS 16
 #define WT_PITCH_BEND_RANGE_SEMITONES 2
 
@@ -89,6 +98,7 @@ typedef struct {
 
     int32_t  region_gain_q16; // baked region attenuation gain (Q16)
     int32_t  amp_q16;         // velocity * region gain * channel vol/expr (Q16)
+    int32_t  trem_amp_q16;    // amp_q16 with control-rate tremolo applied (held per block)
     int16_t  pan_l_q15;
     int16_t  pan_r_q15;
     uint32_t age;
@@ -552,6 +562,42 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
     }
 }
 
+// Control-rate modulation refresh (runs once per WT_BLOCK samples, only for
+// voices that carry an LFO or EG2). This is where the remaining int64-heavy
+// math lives — deep-vibrato LFO depth and wt_pitch_step — so amortizing it over
+// WT_BLOCK samples keeps the per-sample loop free of 64-bit multiplies and of
+// the pitch LUT. Updates v->step_q16 (held for the block) and v->trem_amp_q16
+// (tremolo-applied amp, also held); advances the LFO phase and EG2 by one block.
+INLINE void wt_refresh_mod(wt_voice_t *v) {
+    int32_t dyn_cents_q8 = 0;
+    int32_t amp = v->amp_q16;
+    if (v->has_lfo && v->samples_played >= v->lfo_delay) {
+        int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
+        // mod-depth (<=185600) * modulation (<=127) fits int32.
+        int32_t depth_q8 = v->lfo_depth_q8 +
+                           (v->lfo_mod_depth_q8 * (int32_t) g_channels[v->channel].modulation) / 127;
+        // s (<=32767) * depth_q8 (<=185600 deep SFX vibrato) can exceed 2^31.
+        if (depth_q8) dyn_cents_q8 += (int32_t) (((int64_t) s * depth_q8) >> 15);
+        if (v->trem_depth_q8) {
+            // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
+            int32_t gain_cents_q8 = (s * v->trem_depth_q8) >> 15;
+            amp = (int32_t) wt_pitch_step((uint32_t) v->amp_q16, gain_cents_q8);
+            if (amp > GM_ONE_Q16 - 1) amp = GM_ONE_Q16 - 1; // keep s*gain in int32
+        }
+        v->lfo_phase += v->lfo_phase_inc * (uint32_t) WT_BLOCK;
+    }
+    if (v->has_eg2) {
+        // Match the per-sample reference: advance one step, then read (so the
+        // held value is the post-advance EG2), then finish the block.
+        wt_advance_eg2(v);
+        // level Q16 (<=65536) * cents (<=1200) -> Q8 cents, fits int32.
+        dyn_cents_q8 += (v->eg2_q16 * v->eg2_pitch_cents) >> 8;
+        for (int k = 1; k < WT_BLOCK; ++k) wt_advance_eg2(v);
+    }
+    v->trem_amp_q16 = amp;
+    v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
+}
+
 INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
 
@@ -562,38 +608,17 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         wt_advance_env(v);
         if (!v->active) continue;
 
-        // Per-sample modulation: DLS LFO (pitch vibrato + gain tremolo) and the
-        // EG2 pitch envelope. Recompute the step only while something moves.
-        int32_t amp_q16 = v->amp_q16;
-        int32_t dyn_cents_q8 = 0;
-        int repitch = 0;
-        if (v->has_lfo && v->samples_played >= v->lfo_delay) {
-            int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
-            // mod-depth (<=185600) * modulation (<=127) fits int32.
-            int32_t depth_q8 = v->lfo_depth_q8 +
-                               (v->lfo_mod_depth_q8 * (int32_t) g_channels[v->channel].modulation) / 127;
-            if (depth_q8) {
-                // s (<=32767) * depth_q8 (<=185600 for the deep SFX vibrato)
-                // can exceed 2^31, so this product stays 64-bit.
-                dyn_cents_q8 += (int32_t) (((int64_t) s * depth_q8) >> 15); // Q15 * Q8 -> Q8 cents
-                repitch = 1;
-            }
-            if (v->trem_depth_q8) {
-                // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
-                // s*depth (<=32767*4352) fits int32.
-                int32_t gain_cents_q8 = (s * v->trem_depth_q8) >> 15;
-                amp_q16 = (int32_t) wt_pitch_step((uint32_t) amp_q16, gain_cents_q8);
-                if (amp_q16 > GM_ONE_Q16 - 1) amp_q16 = GM_ONE_Q16 - 1; // keep gain*s in int32
-            }
-            v->lfo_phase += v->lfo_phase_inc;
+        // Pitch/LFO/EG2 are refreshed at control rate; the amplitude envelope
+        // (above) stays per-sample so there is no zipper. Modulated voices read
+        // the held tremolo amp; everyone else uses the live amp so CC7/CC11
+        // volume changes apply immediately.
+        int32_t amp_q16;
+        if (v->has_lfo || v->has_eg2) {
+            if ((v->samples_played & (WT_BLOCK - 1)) == 0) wt_refresh_mod(v);
+            amp_q16 = v->trem_amp_q16;
+        } else {
+            amp_q16 = v->amp_q16;
         }
-        if (v->has_eg2) {
-            wt_advance_eg2(v);
-            // level Q16 (<=65536) * cents (<=1200) -> Q8 cents, fits int32.
-            dyn_cents_q8 += (v->eg2_q16 * v->eg2_pitch_cents) >> 8;
-            repitch = 1;
-        }
-        if (repitch) v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
         v->samples_played++;
 
         // Linear interpolation. frac is reduced to Q15 so the 32x32->32 product

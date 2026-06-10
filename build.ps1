@@ -1,7 +1,9 @@
 param(
     [string]$Target = 'gm_dls_player',
     [int]$Jobs = 14,
-    [switch]$Debug
+    [switch]$Debug,
+    [string[]]$Define = @(),   # extra preprocessor defines, e.g. -Define WT_BLOCK=8
+    [string]$OutName            # override host output exe name (defaults to $Target)
 )
 
 Set-StrictMode -Version Latest
@@ -34,7 +36,8 @@ if ($HostTargets.ContainsKey($Target)) {
     }
 
     New-Item -ItemType Directory -Force -Path $StandaloneBuildDir | Out-Null
-    $OutputExe = Join-Path $StandaloneBuildDir ($Target + '.exe')
+    $ExeName = if ($OutName) { $OutName } else { $Target }
+    $OutputExe = Join-Path $StandaloneBuildDir ($ExeName + '.exe')
     $Source = Join-Path $RepoRoot $HostTargets[$Target]
 
     $CommonArgs = @(
@@ -46,6 +49,7 @@ if ($HostTargets.ContainsKey($Target)) {
         $Source,
         '-lm'
     )
+    foreach ($d in $Define) { $CommonArgs += "-D$d" }
 
     if ($Debug) {
         $CompilerArgs = @('-O0', '-g3') + $CommonArgs
