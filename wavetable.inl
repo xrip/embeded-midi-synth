@@ -247,6 +247,16 @@ static const gm_region_t *wt_find_region(const gm_instrument_t *ins, uint8_t not
 
 // ---- voice helpers -----------------------------------------------------------
 
+// (a*b)>>16 for a,b each up to 2^16, computed from 16x16 partials so there is no
+// 64-bit product (Cortex-M0 has no UMULL; a uint64 would call __aeabi_lmul).
+// Exact: equals floor(a*b / 65536). No intermediate overflows (a*b can reach
+// exactly 2^32, which a single uint32 product cannot hold).
+static inline uint32_t wt_mulshift16(uint32_t a, uint32_t b) {
+    uint32_t alo = a & 0xFFFFu, ahi = a >> 16;
+    uint32_t blo = b & 0xFFFFu, bhi = b >> 16;
+    return ((ahi * bhi) << 16) + ahi * blo + alo * bhi + ((alo * blo) >> 16);
+}
+
 // Pitch factor for a cents offset given in Q8 (cents*256), with sub-cent
 // precision via linear interpolation of the per-cent 2^(c/1200) LUT. Sub-cent
 // accuracy keeps long sustained / vibrato notes from drifting audibly.
@@ -270,9 +280,7 @@ static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents_q8) {
     // take the product, computed from 16x16 partials so Cortex-M0 never calls
     // __aeabi_lmul here — the result equals the old uint64 (a*b)>>16 exactly.
     if (base_step_q16 == GM_ONE_Q16) return f;
-    uint32_t alo = base_step_q16 & 0xFFFFu, ahi = base_step_q16 >> 16;
-    uint32_t blo = f & 0xFFFFu, bhi = f >> 16;
-    return ((ahi * bhi) << 16) + ahi * blo + alo * bhi + ((alo * blo) >> 16);
+    return wt_mulshift16(base_step_q16, f);
 }
 
 // Pitch-bend contribution in Q8 cents. range_cents is integer cents.
@@ -287,14 +295,14 @@ static int wt_rpn_is_bend_range(const wt_channel_t *ch) {
 
 // amp = curve(velocity) * region_gain * curve(volume) * curve(expression), Q16.
 // Velocity and CC7/CC11 use the GM/DLS concave curve (amplitude (x/127)^2), not
-// a linear ramp. Control-rate path only; the int64 products never hit the
-// per-sample loop.
+// a linear ramp. Note-on / CC rate; each factor is <= 1.0 (Q16 <= 65536) so the
+// 16x16-split mulshift stays exact and never calls __aeabi_lmul.
 static void wt_update_amp(wt_voice_t *v) {
     const wt_channel_t *ch = &g_channels[v->channel];
-    int64_t amp = g_cc_gain_q16[v->velocity];
-    amp = (amp * v->region_gain_q16) >> 16;
-    amp = (amp * g_cc_gain_q16[ch->volume]) >> 16;
-    amp = (amp * g_cc_gain_q16[ch->expression]) >> 16;
+    uint32_t amp = g_cc_gain_q16[v->velocity];
+    amp = wt_mulshift16(amp, (uint32_t) v->region_gain_q16);
+    amp = wt_mulshift16(amp, g_cc_gain_q16[ch->volume]);
+    amp = wt_mulshift16(amp, g_cc_gain_q16[ch->expression]);
     // Cap the composite amp just under unity (Q16). The census shows 0 of 1498
     // regions boost (all wsmp gains are cuts), so this never attenuates real
     // content; it guarantees env*amp stays < 2^32 and s*gain stays < 2^31, so
