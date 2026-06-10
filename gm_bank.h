@@ -19,7 +19,7 @@
 #define GM_BANK_MAGIC1 'M'
 #define GM_BANK_MAGIC2 'W'
 #define GM_BANK_MAGIC3 'B'
-#define GM_BANK_VERSION 2u
+#define GM_BANK_VERSION 4u  // v4: region tremolo (LFO->gain) + EG2 pitch envelope
 
 // Fixed-point scales.
 #define GM_Q16 16          // gain, envelope coeffs, sustain: Q16 (65536 = 1.0)
@@ -35,7 +35,8 @@ typedef struct {
 // Region flags
 #define GM_RGN_LOOPED        0x01u  // loop_start/loop_length are valid
 #define GM_RGN_ROOT_FROM_NOTE 0x02u // no wsmp: engine uses played note as root
-#define GM_RGN_HAS_LFO       0x04u  // lfo_* fields drive pitch vibrato
+#define GM_RGN_HAS_LFO       0x04u  // lfo_* fields drive vibrato and/or tremolo
+#define GM_RGN_HAS_EG2       0x08u  // eg2_* fields drive the pitch envelope
 
 typedef struct {
     uint32_t gain_q16;          // baked attenuation gain (Q16)
@@ -49,6 +50,12 @@ typedef struct {
     uint32_t lfo_delay;         // samples before the LFO starts
     int32_t  lfo_depth_q8;      // base vibrato depth, cents in Q8 (cents*256)
     int32_t  lfo_mod_depth_q8;  // extra depth scaled by mod wheel, cents Q8
+    int32_t  lfo_gain_depth_q8; // tremolo depth, log2-amplitude cents Q8 (0 = none)
+    uint32_t eg2_attack_step_q16;  // EG2 (pitch env): linear increment per sample
+    uint32_t eg2_decay_coef_q16;   // per-sample decay multiplier (Q16, <1.0)
+    uint32_t eg2_release_coef_q16; // per-sample release multiplier (Q16, <1.0)
+    uint32_t eg2_sustain_q16;      // EG2 sustain level (Q16)
+    int32_t  eg2_pitch_cents;      // EG2 -> pitch depth at full level, cents
     int16_t  fine_cents;        // pitch fine tune, cents
     uint16_t wave_index;        // index into wave table
     uint8_t  key_low;
@@ -57,9 +64,9 @@ typedef struct {
     uint8_t  vel_high;
     uint8_t  root_key;          // unity note (ignored if GM_RGN_ROOT_FROM_NOTE)
     uint8_t  key_group;         // DLS exclusive group (0 = none)
-    uint8_t  has_eg1;           // 1 = use baked EG1, 0 = engine fallback envelope
+    int8_t   pan;               // region pan offset from DLS art1, MIDI units (-64..63)
     uint8_t  flags;             // GM_RGN_* bits
-} gm_region_t;                  // 56 bytes
+} gm_region_t;                  // 80 bytes
 
 typedef struct {
     uint32_t bank;          // DLS bank number; high bit (0x80000000) = drum bank
@@ -83,7 +90,7 @@ typedef struct {
 } gm_bank_header_t;             // 44 bytes
 
 _Static_assert(sizeof(gm_wave_t) == 12, "gm_wave_t layout");
-_Static_assert(sizeof(gm_region_t) == 56, "gm_region_t layout");
+_Static_assert(sizeof(gm_region_t) == 80, "gm_region_t layout");
 _Static_assert(sizeof(gm_instrument_t) == 12, "gm_instrument_t layout");
 _Static_assert(sizeof(gm_bank_header_t) == 44, "gm_bank_header_t layout");
 

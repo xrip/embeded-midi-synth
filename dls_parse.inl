@@ -17,8 +17,19 @@
 
 #define CONN_SRC_NONE 0x000
 #define CONN_SRC_LFO 0x001
+#define CONN_SRC_KEYONVELOCITY 0x002
+#define CONN_SRC_KEYNUMBER 0x003
+#define CONN_SRC_EG1 0x004
+#define CONN_SRC_EG2 0x005
+#define CONN_SRC_PITCHWHEEL 0x006
 #define CONN_SRC_CC1 0x081
+#define CONN_SRC_CC7 0x087
+#define CONN_SRC_CC10 0x08a
+#define CONN_SRC_CC11 0x08b
+#define CONN_SRC_RPN0 0x100
+#define CONN_DST_ATTENUATION 0x001
 #define CONN_DST_PITCH 0x003
+#define CONN_DST_PAN 0x004
 #define CONN_DST_CHORUS 0x080
 #define CONN_DST_REVERB 0x081
 #define CONN_DST_LFO_FREQUENCY 0x104
@@ -27,8 +38,46 @@
 #define CONN_DST_EG1_DECAYTIME 0x207
 #define CONN_DST_EG1_RELEASETIME 0x209
 #define CONN_DST_EG1_SUSTAINLEVEL 0x20A
+#define CONN_DST_EG2_ATTACKTIME 0x30A
+#define CONN_DST_EG2_DECAYTIME 0x30B
+#define CONN_DST_EG2_RELEASETIME 0x30D
+#define CONN_DST_EG2_SUSTAINLEVEL 0x30E
 #define CONN_DST_FILTER_CUTOFF 0x500
 #define CONN_DST_FILTER_Q 0x501
+
+// ---- art1 connection census ----------------------------------------------
+// Records every (source, control, destination) triple seen while parsing, so
+// offline tools can report which GM.DLS metadata the pipeline consumes and
+// which it silently drops. Guides extraction work with data, not guesses.
+typedef struct {
+    uint16_t source, control, destination;
+    uint32_t count;
+    int32_t scale_min, scale_max;
+} dls_conn_stat_t;
+
+static dls_conn_stat_t g_dls_conn_census[96];
+static size_t g_dls_conn_census_count;
+
+static void dls_census_connection(uint16_t source, uint16_t control, uint16_t destination, int32_t scale) {
+    for (size_t i = 0; i < g_dls_conn_census_count; ++i) {
+        dls_conn_stat_t *s = &g_dls_conn_census[i];
+        if (s->source == source && s->control == control && s->destination == destination) {
+            s->count++;
+            if (scale < s->scale_min) s->scale_min = scale;
+            if (scale > s->scale_max) s->scale_max = scale;
+            return;
+        }
+    }
+    if (g_dls_conn_census_count < sizeof(g_dls_conn_census) / sizeof(g_dls_conn_census[0])) {
+        dls_conn_stat_t *s = &g_dls_conn_census[g_dls_conn_census_count++];
+        s->source = source;
+        s->control = control;
+        s->destination = destination;
+        s->count = 1;
+        s->scale_min = scale;
+        s->scale_max = scale;
+    }
+}
 
 typedef struct {
     uint8_t *data;
@@ -69,14 +118,31 @@ typedef struct {
     int32_t decay_time;
     int32_t release_time;
     int32_t sustain_level;
+    // Key-number scaling of EG1 times (timecents across the 0..128 key range).
+    int32_t decay_keyscale;
+    int32_t hold_keyscale;
+    int32_t attack_keyscale;
+    // Key-on velocity scaling of EG1 attack (timecents across 0..128 velocity).
+    int32_t attack_velscale;
     int32_t lfo_frequency;
     int32_t lfo_delay;
     int32_t filter_cutoff;
     int32_t filter_q;
     int32_t reverb_send;
     int32_t chorus_send;
+    bool has_pan;
+    int32_t pan;                 // DLS pan, 0.1% units in 16.16 (-500..500 = full L..R)
     double lfo_pitch_cents;
     double mod_lfo_pitch_cents;
+    bool has_lfo_gain;
+    int32_t lfo_gain_scale;      // LFO->attenuation (tremolo), 0.1 dB units in 16.16
+    // EG2 (pitch envelope), timecents/permille 16.16 like EG1.
+    bool has_eg2;
+    bool has_eg2_attack, has_eg2_decay, has_eg2_release, has_eg2_sustain;
+    int32_t eg2_attack_time, eg2_decay_time, eg2_release_time, eg2_sustain_level;
+    int32_t eg2_decay_keyscale;  // KEYNUMBER -> EG2 decay time
+    int32_t eg2_attack_velscale; // KEYONVELOCITY -> EG2 attack time
+    int32_t eg2_pitch_scale;     // EG2 -> pitch depth, cents 16.16
 } dls_articulation_t;
 
 typedef struct {
@@ -366,9 +432,14 @@ static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, d
                 uint16_t destination = rd_u16le(file + connection_off + 4);
                 int32_t scale = rd_i32le(file + connection_off + 8);
                 connection_off += 12u;
+                dls_census_connection(source, control, destination, scale);
 
                 if (source == CONN_SRC_NONE && control == CONN_SRC_NONE) {
                     switch (destination) {
+                        case CONN_DST_PAN:
+                            articulation->pan = scale;
+                            articulation->has_pan = true;
+                            break;
                         case CONN_DST_LFO_FREQUENCY:
                             articulation->lfo_frequency = scale;
                             articulation->has_lfo_frequency = true;
@@ -397,6 +468,26 @@ static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, d
                             articulation->has_sustain = true;
                             articulation->has_eg1 = true;
                             break;
+                        case CONN_DST_EG2_ATTACKTIME:
+                            articulation->eg2_attack_time = scale;
+                            articulation->has_eg2_attack = true;
+                            articulation->has_eg2 = true;
+                            break;
+                        case CONN_DST_EG2_DECAYTIME:
+                            articulation->eg2_decay_time = scale;
+                            articulation->has_eg2_decay = true;
+                            articulation->has_eg2 = true;
+                            break;
+                        case CONN_DST_EG2_RELEASETIME:
+                            articulation->eg2_release_time = scale;
+                            articulation->has_eg2_release = true;
+                            articulation->has_eg2 = true;
+                            break;
+                        case CONN_DST_EG2_SUSTAINLEVEL:
+                            articulation->eg2_sustain_level = scale;
+                            articulation->has_eg2_sustain = true;
+                            articulation->has_eg2 = true;
+                            break;
                         case CONN_DST_FILTER_CUTOFF:
                             articulation->filter_cutoff = scale;
                             articulation->has_filter_cutoff = true;
@@ -420,6 +511,24 @@ static void parse_lart(const uint8_t *file, size_t file_size, size_t lart_off, d
                     } else if (control == CONN_SRC_CC1) {
                         articulation->mod_lfo_pitch_cents += (double) scale / 65536.0;
                     }
+                } else if (source == CONN_SRC_LFO && control == CONN_SRC_NONE &&
+                           destination == CONN_DST_ATTENUATION) {
+                    articulation->lfo_gain_scale = scale;
+                    articulation->has_lfo_gain = true;
+                } else if (source == CONN_SRC_EG2 && control == CONN_SRC_NONE &&
+                           destination == CONN_DST_PITCH) {
+                    articulation->eg2_pitch_scale = scale;
+                } else if (source == CONN_SRC_KEYNUMBER && control == CONN_SRC_NONE) {
+                    // Key-number scaling of envelope times (higher notes -> faster).
+                    switch (destination) {
+                        case CONN_DST_EG1_DECAYTIME: articulation->decay_keyscale = scale; break;
+                        case CONN_DST_EG1_ATTACKTIME: articulation->attack_keyscale = scale; break;
+                        case CONN_DST_EG2_DECAYTIME: articulation->eg2_decay_keyscale = scale; break;
+                        default: break;
+                    }
+                } else if (source == CONN_SRC_KEYONVELOCITY && control == CONN_SRC_NONE) {
+                    if (destination == CONN_DST_EG1_ATTACKTIME) articulation->attack_velscale = scale;
+                    if (destination == CONN_DST_EG2_ATTACKTIME) articulation->eg2_attack_velscale = scale;
                 }
             }
         }
@@ -738,9 +847,14 @@ static double dls_sustain_to_gain(int32_t sustain_16_16) {
     return sustain / 1000.0;
 }
 
+// DLS EG decay/release are linear in dB: a constant slope covering the full
+// 96 dB range in `seconds`. As a per-sample amplitude multiplier that is
+// 10^(-96/20 / (seconds*rate)). The engine applies it directly to the envelope
+// (linear-in-dB ramp), clamping at sustain (decay) or freeing near -80 dB
+// (release) — NOT an asymptotic approach toward sustain.
 static double decay_coef_for_seconds(double seconds, uint32_t sample_rate) {
     if (seconds <= 0.0) return 0.0;
-    return pow(0.001, 1.0 / (seconds * (double) sample_rate));
+    return pow(10.0, -4.8 / (seconds * (double) sample_rate));
 }
 
 static double wave_read_channel(const dls_wave_t *wave, uint32_t frame, uint16_t channel) {

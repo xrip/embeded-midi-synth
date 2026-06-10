@@ -69,7 +69,17 @@ typedef struct {
     uint32_t lfo_delay;       // samples before LFO starts
     int32_t  lfo_depth_q8;    // cents Q8
     int32_t  lfo_mod_depth_q8;// cents Q8 (scaled by mod wheel)
+    int32_t  trem_depth_q8;   // tremolo depth, log2-amplitude cents Q8 (0 = none)
     uint32_t samples_played;
+
+    uint8_t  has_eg2;         // EG2 pitch envelope active
+    uint8_t  eg2_stage;
+    int32_t  eg2_q16;         // current EG2 level (Q16, 0..65536)
+    int32_t  eg2_sustain_q16;
+    int32_t  eg2_attack_step_q16;
+    int32_t  eg2_decay_coef_q16;
+    int32_t  eg2_release_coef_q16;
+    int32_t  eg2_pitch_cents; // pitch offset at full EG2 level
 
     int32_t  env_q16;         // current envelope amplitude (Q16, 0..65536)
     int32_t  sustain_q16;
@@ -111,6 +121,7 @@ static uint32_t g_pow2_cents_q16[1200];
 static int16_t  g_pan_l_q15[128];
 static int16_t  g_pan_r_q15[128];
 static int16_t  g_sin_q15[WT_SIN_SIZE];
+static uint32_t g_cc_gain_q16[128];   // GM concave curve for velocity/CC7/CC11
 
 static void wt_build_luts(void) {
     for (int c = 0; c < 1200; ++c) {
@@ -123,6 +134,10 @@ static void wt_build_luts(void) {
     }
     for (int i = 0; i < WT_SIN_SIZE; ++i) {
         g_sin_q15[i] = (int16_t) lround(sin(2.0 * M_PI * (double) i / (double) WT_SIN_SIZE) * 32767.0);
+    }
+    for (int v = 0; v < 128; ++v) {
+        // GM/DLS concave gain curve: 40*log10(v/127) dB == amplitude (v/127)^2.
+        g_cc_gain_q16[v] = (uint32_t) lround((double) (v * v) / (127.0 * 127.0) * 65536.0);
     }
 }
 
@@ -172,24 +187,19 @@ static const gm_instrument_t *wt_find_instrument(uint32_t dls_bank, uint32_t pro
     return fb_program ? fb_program : fb_piano;
 }
 
+// DLS region selection: first region whose key AND velocity ranges match.
+// No "nearest" fallback — per the spec a note with no matching region simply
+// does not sound (the legacy reference invented a nearest-key fallback, which
+// could pick a wrong velocity layer or a wildly re-pitched neighbor sample).
 static const gm_region_t *wt_find_region(const gm_instrument_t *ins, uint8_t note, uint8_t velocity) {
-    const gm_region_t *nearest = NULL;
-    int nearest_distance = 1000;
     for (uint32_t i = 0; i < ins->region_count; ++i) {
         const gm_region_t *rg = &g_bank.regions[ins->region_first + i];
         if (note >= rg->key_low && note <= rg->key_high &&
             velocity >= rg->vel_low && velocity <= rg->vel_high) {
             return rg;
         }
-        int distance = 0;
-        if (note < rg->key_low) distance = (int) rg->key_low - note;
-        if (note > rg->key_high) distance = note - (int) rg->key_high;
-        if (!nearest || distance < nearest_distance) {
-            nearest = rg;
-            nearest_distance = distance;
-        }
     }
-    return nearest;
+    return NULL;
 }
 
 // ---- voice helpers -----------------------------------------------------------
@@ -226,14 +236,20 @@ static int wt_rpn_is_bend_range(const wt_channel_t *ch) {
     return ch->rpn_msb == 0 && ch->rpn_lsb == 0;
 }
 
-// amp = (velocity/127) * region_gain * (volume/127) * (expression/127), Q16.
-// velocity/127 approximated as velocity<<9 (127<<9 = 65024 ~ 0.992).
+// amp = curve(velocity) * region_gain * curve(volume) * curve(expression), Q16.
+// Velocity and CC7/CC11 use the GM/DLS concave curve (amplitude (x/127)^2), not
+// a linear ramp. Control-rate path only; the int64 products never hit the
+// per-sample loop.
 static void wt_update_amp(wt_voice_t *v) {
     const wt_channel_t *ch = &g_channels[v->channel];
-    int64_t amp = (int64_t) (v->velocity << 9);
+    int64_t amp = g_cc_gain_q16[v->velocity];
     amp = (amp * v->region_gain_q16) >> 16;
-    amp = (amp * (ch->volume << 9)) >> 16;
-    amp = (amp * (ch->expression << 9)) >> 16;
+    amp = (amp * g_cc_gain_q16[ch->volume]) >> 16;
+    amp = (amp * g_cc_gain_q16[ch->expression]) >> 16;
+    // Some GM.DLS wsmp entries carry positive gain (boost). Cap the composite
+    // amp at 2.0 so |sample * gain| stays inside the int32 budget of the
+    // per-sample pan multiply.
+    if (amp > 2 * GM_ONE_Q16 - 1) amp = 2 * GM_ONE_Q16 - 1;
     v->amp_q16 = (int32_t) amp;
 }
 
@@ -263,6 +279,7 @@ static void wt_release_voice(wt_voice_t *v) {
     if (!v->active) return;
     v->sustained = 0;
     v->amp_stage = WT_RELEASE;
+    if (v->has_eg2) v->eg2_stage = WT_RELEASE;
 }
 
 static void wt_note_off(uint8_t channel, uint8_t note) {
@@ -309,10 +326,7 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     v->pcm = g_bank.pcm + w->pcm_offset;
     v->frame_count = w->frame_count;
-    // Melodic notes loop (sustain loop); GM percussion is one-shot — the DLS
-    // drum loop is a sustain loop never meant for the short, self-contained
-    // drum hits, and looping their tails turns noise into a buzzy "sand" tone.
-    if (!v->percussion && (rg->flags & GM_RGN_LOOPED)) {
+    if (rg->flags & GM_RGN_LOOPED) {  // honor DLS loop (EG1 decay governs ring time)
         v->looped = 1;
         v->loop_start = rg->loop_start;
         v->loop_end = rg->loop_start + rg->loop_length;
@@ -328,12 +342,32 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
         v->lfo_delay = rg->lfo_delay;
         v->lfo_depth_q8 = rg->lfo_depth_q8;
         v->lfo_mod_depth_q8 = rg->lfo_mod_depth_q8;
+        v->trem_depth_q8 = rg->lfo_gain_depth_q8;
+    }
+    if (rg->flags & GM_RGN_HAS_EG2) {
+        v->has_eg2 = 1;
+        v->eg2_sustain_q16 = (int32_t) rg->eg2_sustain_q16;
+        v->eg2_attack_step_q16 = (int32_t) rg->eg2_attack_step_q16;
+        v->eg2_decay_coef_q16 = (int32_t) rg->eg2_decay_coef_q16;
+        v->eg2_release_coef_q16 = (int32_t) rg->eg2_release_coef_q16;
+        v->eg2_pitch_cents = rg->eg2_pitch_cents;
+        if (v->eg2_attack_step_q16 >= GM_ONE_Q16) {
+            v->eg2_q16 = GM_ONE_Q16;
+            v->eg2_stage = WT_DECAY;
+        } else {
+            v->eg2_q16 = 0;
+            v->eg2_stage = WT_ATTACK;
+        }
     }
     wt_update_pitch(v);
     wt_update_amp(v);
 
-    v->pan_l_q15 = g_pan_l_q15[ch->pan];
-    v->pan_r_q15 = g_pan_r_q15[ch->pan];
+    // Channel pan (CC10) plus the region's DLS art1 pan offset (drum kits pan
+    // toms/cymbals across the stereo field this way).
+    int pan = (int) ch->pan + rg->pan;
+    if (pan < 0) pan = 0; else if (pan > 127) pan = 127;
+    v->pan_l_q15 = g_pan_l_q15[pan];
+    v->pan_r_q15 = g_pan_r_q15[pan];
 
     v->sustain_q16 = rg->sustain_q16;
     v->attack_step_q16 = rg->attack_step_q16;
@@ -369,11 +403,13 @@ static void parse_midi(const midi_command_t *m) {
     wt_channel_t *ch = &g_channels[channel];
     switch (m->command >> 4) {
         case 0x9:
-            if (m->velocity) wt_note_on(channel, m->note, m->velocity);
-            else wt_note_off(channel, m->note);
+            // Mask to 7 bits at the boundary: velocity indexes g_cc_gain_q16,
+            // and on-device bytes arrive from a raw MPU-401 stream.
+            if (m->velocity & 0x7f) wt_note_on(channel, m->note & 0x7f, m->velocity & 0x7f);
+            else wt_note_off(channel, m->note & 0x7f);
             break;
         case 0x8:
-            wt_note_off(channel, m->note);
+            wt_note_off(channel, m->note & 0x7f);
             break;
         case 0xb:
             switch (m->note) {
@@ -464,14 +500,10 @@ INLINE void wt_advance_env(wt_voice_t *v) {
             }
             break;
         case WT_DECAY:
-            if (v->env_q16 > v->sustain_q16) {
-                int32_t d = v->env_q16 - v->sustain_q16;
-                v->env_q16 = v->sustain_q16 + (int32_t) (((int64_t) d * v->decay_coef_q16) >> 16);
-                if (v->env_q16 <= v->sustain_q16 + 6) {
-                    v->env_q16 = v->sustain_q16;
-                    v->amp_stage = WT_SUSTAIN;
-                }
-            } else {
+            // DLS decay: linear-in-dB ramp (constant per-sample multiplier)
+            // that clamps at the sustain level.
+            v->env_q16 = (int32_t) (((int64_t) v->env_q16 * v->decay_coef_q16) >> 16);
+            if (v->env_q16 <= v->sustain_q16) {
                 v->env_q16 = v->sustain_q16;
                 v->amp_stage = WT_SUSTAIN;
             }
@@ -489,6 +521,34 @@ INLINE void wt_advance_env(wt_voice_t *v) {
     }
 }
 
+// EG2 (pitch envelope): same ADSR shapes as the amplitude EG1, but it never
+// kills the voice — EG1 owns voice lifetime.
+INLINE void wt_advance_eg2(wt_voice_t *v) {
+    switch (v->eg2_stage) {
+        case WT_ATTACK:
+            v->eg2_q16 += v->eg2_attack_step_q16;
+            if (v->eg2_q16 >= GM_ONE_Q16) {
+                v->eg2_q16 = GM_ONE_Q16;
+                v->eg2_stage = WT_DECAY;
+            }
+            break;
+        case WT_DECAY:
+            // Same linear-in-dB ramp as EG1, clamped at the EG2 sustain level.
+            v->eg2_q16 = (int32_t) (((int64_t) v->eg2_q16 * v->eg2_decay_coef_q16) >> 16);
+            if (v->eg2_q16 <= v->eg2_sustain_q16) {
+                v->eg2_q16 = v->eg2_sustain_q16;
+                v->eg2_stage = WT_SUSTAIN;
+            }
+            break;
+        case WT_SUSTAIN:
+            break;
+        case WT_RELEASE:
+            v->eg2_q16 = (int32_t) (((int64_t) v->eg2_q16 * v->eg2_release_coef_q16) >> 16);
+            break;
+        default: break;
+    }
+}
+
 INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
 
@@ -499,25 +559,46 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         wt_advance_env(v);
         if (!v->active) continue;
 
-        // Pitch vibrato (DLS LFO -> pitch). Recompute step only while active.
+        // Per-sample modulation: DLS LFO (pitch vibrato + gain tremolo) and the
+        // EG2 pitch envelope. Recompute the step only while something moves.
+        int32_t amp_q16 = v->amp_q16;
+        int32_t dyn_cents_q8 = 0;
+        int repitch = 0;
         if (v->has_lfo && v->samples_played >= v->lfo_delay) {
             int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
             int32_t depth_q8 = v->lfo_depth_q8 +
                                (int32_t) (((int64_t) v->lfo_mod_depth_q8 * g_channels[v->channel].modulation) / 127);
-            int32_t lfo_cents_q8 = (int32_t) (((int64_t) s * depth_q8) >> 15); // Q15 * Q8 -> Q8 cents
-            v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + lfo_cents_q8);
+            if (depth_q8) {
+                dyn_cents_q8 += (int32_t) (((int64_t) s * depth_q8) >> 15); // Q15 * Q8 -> Q8 cents
+                repitch = 1;
+            }
+            if (v->trem_depth_q8) {
+                // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
+                int32_t gain_cents_q8 = (int32_t) (((int64_t) s * v->trem_depth_q8) >> 15);
+                amp_q16 = (int32_t) wt_pitch_step((uint32_t) amp_q16, gain_cents_q8);
+            }
             v->lfo_phase += v->lfo_phase_inc;
         }
+        if (v->has_eg2) {
+            wt_advance_eg2(v);
+            // level Q16 * cents -> Q8 cents.
+            dyn_cents_q8 += (int32_t) (((int64_t) v->eg2_q16 * v->eg2_pitch_cents) >> 8);
+            repitch = 1;
+        }
+        if (repitch) v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
         v->samples_played++;
 
-        // Linear interpolation.
+        // Linear interpolation. frac is reduced to Q15 so the 32x32->32 product
+        // never overflows: |s1-s0| <= 65535 and frac <= 32767 keep it under
+        // INT32_MAX. With full Q16 frac, loud transients (|s1-s0| > 32768, e.g.
+        // saw-edge basses, cymbal noise) overflowed into full-scale spikes.
         uint32_t i0 = v->frame_pos;
         int32_t s0 = v->pcm[i0];
         uint32_t i1 = i0 + 1;
         int32_t s1 = (i1 < v->frame_count) ? v->pcm[i1] : s0;
-        int32_t s = s0 + (((s1 - s0) * (int32_t) v->frac) >> 16);
+        int32_t s = s0 + (((s1 - s0) * (int32_t) (v->frac >> 1)) >> 15);
 
-        int32_t gain = (int32_t) (((int64_t) v->env_q16 * v->amp_q16) >> 16); // Q16
+        int32_t gain = (int32_t) (((int64_t) v->env_q16 * amp_q16) >> 16); // Q16
         int32_t val = (int32_t) (((int64_t) s * gain) >> 16);
 
         l += (val * v->pan_l_q15) >> 15;
@@ -535,13 +616,14 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         }
     }
 
-    // Master gain ~0.45 then clamp.
-    l = (l * 29491) >> 16;
-    r = (r * 29491) >> 16;
-    if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
-    if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
-    *out_l = (int16_t) l;
-    *out_r = (int16_t) r;
+    // Master gain ~0.45 (29491/65536). Clamp the accumulator BEFORE the gain
+    // multiply so it stays a single 32x32->32 mul (no __aeabi_lmul on M0):
+    // 72818 * 29491 = 2147475638 < INT32_MAX, and >>16 spans exactly the full
+    // int16 range, so no post-clamp is needed.
+    if (l > 72818) l = 72818; else if (l < -72818) l = -72818;
+    if (r > 72818) r = 72818; else if (r < -72818) r = -72818;
+    *out_l = (int16_t) ((l * 29491) >> 16);
+    *out_r = (int16_t) ((r * 29491) >> 16);
 }
 
 INLINE int wt_has_active_voices(void) {

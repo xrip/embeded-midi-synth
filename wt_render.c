@@ -6,6 +6,7 @@
 // (wavetable.inl) over a Standard MIDI File using the same tick->sample timing
 // as the golden reference (gm_dls_player.c), and writes 16-bit stereo WAV. Used
 // to validate the fixed-point engine on the desktop before flashing.
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,7 @@
 #ifndef SOUND_FREQUENCY
 #define SOUND_FREQUENCY 22050   // GM.DLS samples are natively 22050 Hz
 #endif
+#define WT_MAX_VOICES 32   // match the RP2040 target so A/B stealing is identical
 #include "wavetable.inl"
 
 // ---- minimal WAV writer ------------------------------------------------------
@@ -65,12 +67,15 @@ static int wav_close(wav_t *w) {
 // ---- sequencer (same timing math as gm_dls_player render_midi_to_wav) --------
 
 static void render_block(wav_t *wav, uint64_t samples) {
+    extern int g_probe_max; extern long g_probe_sum, g_probe_n;
     for (uint64_t i = 0; i < samples; ++i) {
         int16_t l, r;
         midi_sample_stereo(&l, &r);
         wav_write(wav, l, r);
+        if ((wav->frames & 1023)==0){int a=0;for(int v=0;v<WT_MAX_VOICES;++v)if(g_voices[v].active)a++; if(a>g_probe_max)g_probe_max=a; g_probe_sum+=a; g_probe_n++;}
     }
 }
+int g_probe_max=0; long g_probe_sum=0,g_probe_n=0; //VOICEPROBE
 
 int main(int argc, char **argv) {
     if (argc < 4 || argc > 5) {
@@ -134,6 +139,7 @@ int main(int argc, char **argv) {
 
     int ok = wav_close(&wav);
     fprintf(stderr, "WT: %u Hz stereo, %u frames -> %s\n", sample_rate, wav.frames, wav_path);
+    fprintf(stderr, "VOICES peak=%d avg=%.1f\n", g_probe_max, g_probe_n ? (double) g_probe_sum / g_probe_n : 0.0);
     midi_file_free(&midi);
     free_file_blob(&bank_blob);
     return ok ? 0 : 1;
