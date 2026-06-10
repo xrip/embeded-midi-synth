@@ -16,43 +16,47 @@ flash data** (our PCM is `.incbin`'d in flash). 32 voices streaming PCM evict th
 render code from cache and vice-versa. Moving code to RAM removes that contention
 *and* dedicates the whole cache to PCM.
 
-## Step 1 — Wire the engine in (functional first, no opt)
+## Step 1 — Wire the engine in (DONE in general-midi.c.inl)
 
-Includer contract (general-midi.c.inl):
-```c
-#define INLINE static inline
-#define SOUND_FREQUENCY 22050           // must equal the bank's output_rate
-#define WT_MAX_VOICES   32
-// #define WT_BLOCK 8                    // default; control-rate modulation
-#include "gm_bank.h"
-#include "wavetable.inl"
-```
-- `.incbin` `gm_bank.bin` at a **4-byte-aligned flash address**, NOT
-  `__not_in_flash` (it's 3 MB — must stay in flash):
-  ```c
-  extern const uint8_t gm_bank_blob[];  // from an .S: .incbin, .balign 4
-  ```
-- Boot once: `wt_set_bank(gm_bank_blob);` (fills the static `g_bank`, builds/uses
-  LUTs). Verify `gm_bank_view()` magic/version match (v4).
-- MIDI in: route each MPU-401/USB-MIDI message to `parse_midi(&cmd)`. Reconcile
-  `midi_command_t` — wavetable.inl defines its own (command/note/velocity/other)
-  unless `WT_MIDI_COMMAND_T_DEFINED`; if the emulator already has one, define that
-  macro and match the layout.
-- Audio out: from the I2S DMA refill, call `midi_sample_stereo(&l,&r)` per frame
-  (or the block API in Step 4) and write the buffer.
+`general-midi.c.inl` now drives the wavetable engine and keeps the existing
+`mpu401.c.inl` contract: `parse_midi(midi_command_t*)` (from wavetable.inl) and a
+mono `int16_t midi_sample(void)` wrapper over `midi_sample_stereo`. It also
+RAM-places the hot path (Step 2) and binds the bank via a `constructor` +
+lazy-init. It needs nothing from the emulator beyond `INLINE` (and, optionally,
+`__not_in_flash_func`), both of which emulator.h already provides.
 
-Sanity: play a MIDI, confirm it sounds like the host `wt_render` output.
+What **you** do in the firmware build:
+1. Generate the bank for the playback rate:
+   `dls_pack gm.dls gm_bank.bin 22050` (host tool, already built).
+2. Add `gm_bank.S` (provided) to the firmware target's sources; it `.incbin`s
+   `gm_bank.bin` into `.rodata` (flash) as `gm_bank_blob`. Make `gm_bank.bin`
+   reachable by the assembler (`-I<dir>` on that source, or generate it into the
+   build dir). See the comment in `gm_bank.S`.
+3. **Flash size**: the bank is ~3 MB; ensure the board/linker allows it
+   (`PICO_FLASH_SIZE_BYTES` / a >=4 MB flash). Default Pico is 2 MB — too small.
+4. Build, flash, play. The `constructor` calls `wt_set_bank(gm_bank_blob)` before
+   `main`; audio comes out mono via the existing `midi_sample()` caller.
 
-## Step 2 — RAM-place the hot path (the #1 win, do unconditionally)
+Sanity: it should sound like the host `wt_render` output (mono sum).
 
-```c
-#define WT_RAMFUNC(name) __not_in_flash_func(name)   // before #include "wavetable.inl"
-```
-This already wraps `midi_sample_stereo` and `parse_midi`. Also mark the I2S
-refill/callback `__not_in_flash_func`. `g_voices`/`g_channels` are plain statics
-(already RAM). LUTs are `const` (flash) but read only at control/note-on rate —
-leave them in flash; relocate to RAM only if Step 3 shows it matters (costs ~8 KB
-SRAM).
+Notes:
+- `midi_command_t` is supplied by wavetable.inl (command/note/velocity/other),
+  matching the `uint32` `mpu401.c.inl` casts. If the emulator defines its own,
+  set `WT_MIDI_COMMAND_T_DEFINED` and match the layout.
+- Rate: the engine does not resample, so pitch/tempo are correct only when the
+  output rate equals the bank's `output_rate`. Repack at your rate when you tune
+  it (no code change).
+- For true stereo + DLS pan, switch the emulator's audio mix from `midi_sample()`
+  to `midi_sample_stereo(&l,&r)`.
+
+## Step 2 — RAM-place the hot path (DONE; the #1 win)
+
+`general-midi.c.inl` defines `WT_RAMFUNC(name) -> __not_in_flash_func(name)` when
+the SDK macro exists, so `midi_sample_stereo` and `parse_midi` are RAM-resident.
+Also mark the **I2S refill/callback** `__not_in_flash_func` on your side.
+`g_voices`/`g_channels` are plain statics (already RAM). LUTs are `const` (flash)
+but read only at control/note-on rate — leave them in flash; relocate to RAM only
+if Step 3 shows it matters (~8 KB SRAM).
 
 Result: the per-sample loop runs entirely from SRAM except the two PCM reads, and
 the XIP cache is dedicated to PCM.

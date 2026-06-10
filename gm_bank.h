@@ -15,6 +15,13 @@
 
 #include <stdint.h>
 
+// DLS drum-kit marker in gm_instrument_t.bank (high bit). Defined here so the
+// real-time engine needs only gm_bank.h, not the host RIFF parser; dls_parse.inl
+// defines the same value, which is a harmless identical redefinition.
+#ifndef DLS_DRUM_BANK
+#define DLS_DRUM_BANK 0x80000000u
+#endif
+
 #define GM_BANK_MAGIC0 'G'
 #define GM_BANK_MAGIC1 'M'
 #define GM_BANK_MAGIC2 'W'

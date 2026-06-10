@@ -25,9 +25,10 @@ if (($env:PATH -split ';') -notcontains $ClionMingwBin) {
 }
 
 $HostTargets = @{
-    'gm_dls_player' = 'gm_dls_player.c'
-    'dls_pack'      = 'dls_pack.c'
-    'wt_render'     = 'wt_render.c'
+    'gm_dls_player'  = 'gm_dls_player.c'
+    'dls_pack'       = 'dls_pack.c'
+    'wt_render'      = 'wt_render.c'
+    'midi_selfcheck' = 'tools/midi_selfcheck.c'
 }
 
 if ($HostTargets.ContainsKey($Target)) {
@@ -54,7 +55,7 @@ if ($HostTargets.ContainsKey($Target)) {
     if ($Debug) {
         $CompilerArgs = @('-O0', '-g3') + $CommonArgs
     } else {
-        $CompilerArgs = @('-O3', '-DNDEBUG') + $CommonArgs
+        $CompilerArgs = @('-Ofast', '-ffunction-sections', '-fdata-sections', '-DNDEBUG') + $CommonArgs
     }
 
     & $GccExe @CompilerArgs
