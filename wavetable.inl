@@ -127,6 +127,11 @@ static uint32_t g_next_age;
 // 2^(cents/1200) in Q16 for one octave of cents; octaves applied by shifting.
 #define WT_SIN_BITS 10
 #define WT_SIN_SIZE (1 << WT_SIN_BITS)
+
+#ifdef WT_RUNTIME_LUTS
+// Reference path: compute the LUTs at boot with pow/sin/cos (pulls in libm /
+// soft-float). Used only to validate the baked tables — a build with this
+// defined must render bit-for-bit identically to the default baked build.
 static uint32_t g_pow2_cents_q16[1200];
 static int16_t  g_pan_l_q15[128];
 static int16_t  g_pan_r_q15[128];
@@ -150,6 +155,12 @@ static void wt_build_luts(void) {
         g_cc_gain_q16[v] = (uint32_t) lround((double) (v * v) / (127.0 * 127.0) * 65536.0);
     }
 }
+#else
+// Default: baked const tables (regenerate via tools/gen_luts.py). No boot-time
+// float, no libm. g_sin_q15 is sized WT_SIN_SIZE (1024) in the header.
+#include "wt_luts.h"
+static void wt_build_luts(void) {}
+#endif
 
 static void wt_engine_reset(void) {
     memset(g_voices, 0, sizeof(g_voices));
