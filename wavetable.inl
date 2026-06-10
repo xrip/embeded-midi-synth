@@ -651,8 +651,11 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
         // mod-depth (<=185600) * modulation (<=127) fits int32.
         int32_t depth_q8 = v->lfo_depth_q8 +
                            (v->lfo_mod_depth_q8 * (int32_t) g_channels[v->channel].modulation) / 127;
-        // s (<=32767) * depth_q8 (<=185600 deep SFX vibrato) can exceed 2^31.
-        if (depth_q8) dyn_cents_q8 += (int32_t) (((int64_t) s * depth_q8) >> 15);
+        // s*depth_q8 (depth up to ~725 cents -> 185600) can exceed 2^31, so drop
+        // depth to Q4 (1/16-cent steps, inaudible): s (<=32767) * depth>>4
+        // (<=~23200) stays in int32. This removes the last 64-bit mul -- the era
+        // hardware never did wide vibrato math either. Same Q8-cents result.
+        if (depth_q8) dyn_cents_q8 += (s * (depth_q8 >> 4)) >> 11;
         if (v->trem_depth_q8) {
             // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
             int32_t gain_cents_q8 = (s * v->trem_depth_q8) >> 15;
