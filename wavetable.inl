@@ -124,6 +124,27 @@ static wt_voice_t  g_voices[WT_MAX_VOICES];
 static wt_channel_t g_channels[WT_MIDI_CHANNELS];
 static uint32_t g_next_age;
 
+// Active-voice bitmask: bit i set iff g_voices[i].active. Lets the audio loop
+// and allocator visit only live voices instead of scanning all WT_MAX_VOICES.
+static uint32_t g_active_mask;
+_Static_assert(WT_MAX_VOICES <= 32, "voice bitmask is 32-bit");
+#define WT_VOICE_ALL ((uint32_t) ((1ull << WT_MAX_VOICES) - 1ull))
+
+// Count trailing zeros via a de Bruijn LUT: Cortex-M0+ (ARMv6-M) has no CLZ/
+// RBIT, so this (isolate-low-bit, one MUL, shift, byte load) replaces a
+// bit-scan loop / __builtin_ctz libcall.
+static const uint8_t g_ctz32[32] = {
+    0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+    31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9,
+};
+static inline int wt_ctz32(uint32_t x) {  // x must be non-zero
+    return g_ctz32[((x & (0u - x)) * 0x077CB531u) >> 27];
+}
+static inline void wt_voice_kill(wt_voice_t *v) {
+    v->active = 0;
+    g_active_mask &= ~(1u << (uint32_t) (v - g_voices));
+}
+
 // 2^(cents/1200) in Q16 for one octave of cents; octaves applied by shifting.
 #define WT_SIN_BITS 10
 #define WT_SIN_SIZE (1 << WT_SIN_BITS)
@@ -164,6 +185,7 @@ static void wt_build_luts(void) {}
 
 static void wt_engine_reset(void) {
     memset(g_voices, 0, sizeof(g_voices));
+    g_active_mask = 0;
     g_next_age = 0;
     for (int i = 0; i < WT_MIDI_CHANNELS; ++i) {
         g_channels[i].program = 0;
@@ -284,10 +306,9 @@ static void wt_update_pitch(wt_voice_t *v) {
 }
 
 static wt_voice_t *wt_alloc_voice(void) {
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        if (!g_voices[i].active) return &g_voices[i];
-    }
-    // Steal the quietest voice.
+    uint32_t free = ~g_active_mask & WT_VOICE_ALL;
+    if (free) return &g_voices[wt_ctz32(free)];  // first free slot, O(1)
+    // All voices busy: steal the quietest.
     wt_voice_t *q = &g_voices[0];
     for (int i = 1; i < WT_MAX_VOICES; ++i) {
         if (g_voices[i].env_q16 < q->env_q16 ||
@@ -306,9 +327,9 @@ static void wt_release_voice(wt_voice_t *v) {
 }
 
 static void wt_note_off(uint8_t channel, uint8_t note) {
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        wt_voice_t *v = &g_voices[i];
-        if (!v->active || v->channel != channel || v->note != note) continue;
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+        if (v->channel != channel || v->note != note) continue;
         // One-shot drums play to the end (ignore note-off); looped/sustained
         // drums and all melodic voices release per their DLS envelope.
         if (v->percussion && !v->looped) continue;
@@ -330,16 +351,17 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     if (w->frame_count < 2) return;
 
     // Voice stealing: retrigger same note; drum exclusive key groups.
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        wt_voice_t *v = &g_voices[i];
-        if (!v->active || v->channel != channel) continue;
-        if (v->note == note && !v->percussion) v->active = 0;
-        else if (channel == 9 && rg->key_group != 0 && v->key_group == rg->key_group) v->active = 0;
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+        if (v->channel != channel) continue;
+        if (v->note == note && !v->percussion) wt_voice_kill(v);
+        else if (channel == 9 && rg->key_group != 0 && v->key_group == rg->key_group) wt_voice_kill(v);
     }
 
     wt_voice_t *v = wt_alloc_voice();
     memset(v, 0, sizeof(*v));
     v->active = 1;
+    g_active_mask |= 1u << (uint32_t) (v - g_voices);
     v->percussion = channel == 9;
     v->channel = channel;
     v->note = note;
@@ -407,17 +429,17 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
 
 // Recompute pitch for all sounding voices on a channel (pitch bend).
 static void wt_channel_repitch(uint8_t channel) {
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        wt_voice_t *v = &g_voices[i];
-        if (v->active && v->channel == channel) wt_update_pitch(v);
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+        if (v->channel == channel) wt_update_pitch(v);
     }
 }
 
 // Recompute amplitude for all sounding voices on a channel (volume/expression).
 static void wt_channel_reamp(uint8_t channel) {
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        wt_voice_t *v = &g_voices[i];
-        if (v->active && v->channel == channel) wt_update_amp(v);
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+        if (v->channel == channel) wt_update_amp(v);
     }
 }
 
@@ -470,21 +492,23 @@ static void parse_midi(const midi_command_t *m) {
                         ch->sustain = 1;
                     } else {
                         ch->sustain = 0;
-                        for (int i = 0; i < WT_MAX_VOICES; ++i) {
-                            wt_voice_t *v = &g_voices[i];
-                            if (v->active && v->channel == channel && v->sustained) wt_release_voice(v);
+                        for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+                            wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+                            if (v->channel == channel && v->sustained) wt_release_voice(v);
                         }
                     }
                     break;
                 case 0x78:
-                    for (int i = 0; i < WT_MAX_VOICES; ++i)
-                        if (g_voices[i].channel == channel) g_voices[i].active = 0;
+                    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+                        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+                        if (v->channel == channel) wt_voice_kill(v);
+                    }
                     break;
                 case 0x7b:
-                    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-                        wt_voice_t *v = &g_voices[i];
-                        if (v->active && v->channel == channel) {
-                            if (v->percussion) v->active = 0; else wt_release_voice(v);
+                    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+                        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+                        if (v->channel == channel) {
+                            if (v->percussion) wt_voice_kill(v); else wt_release_voice(v);
                         }
                     }
                     break;
@@ -535,11 +559,11 @@ INLINE void wt_advance_env(wt_voice_t *v) {
         case WT_SUSTAIN:
             // A voice that decayed to (near) silence is done; free it so looped
             // samples with zero sustain don't ring forever.
-            if (v->sustain_q16 < 8) v->active = 0;
+            if (v->sustain_q16 < 8) wt_voice_kill(v);
             break;
         case WT_RELEASE:
             v->env_q16 = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) v->release_coef_q16) >> 16);
-            if (v->env_q16 < 6) v->active = 0;
+            if (v->env_q16 < 6) wt_voice_kill(v);
             break;
         default: break;
     }
@@ -612,12 +636,11 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
 INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
 
-    for (int i = 0; i < WT_MAX_VOICES; ++i) {
-        wt_voice_t *v = &g_voices[i];
-        if (!v->active) continue;
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
 
         wt_advance_env(v);
-        if (!v->active) continue;
+        if (!v->active) continue;  // env may have killed it (mask updated)
 
         // Pitch/LFO/EG2 are refreshed at control rate; the amplitude envelope
         // (above) stays per-sample so there is no zipper. Modulated voices read
@@ -658,7 +681,7 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         if (v->looped) {
             while (v->frame_pos >= v->loop_end) v->frame_pos -= (v->loop_end - v->loop_start);
         } else if (v->frame_pos + 1 >= v->frame_count) {
-            v->active = 0;
+            wt_voice_kill(v);
         }
     }
 
@@ -673,7 +696,5 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
 }
 
 INLINE int wt_has_active_voices(void) {
-    for (int i = 0; i < WT_MAX_VOICES; ++i)
-        if (g_voices[i].active) return 1;
-    return 0;
+    return g_active_mask != 0;
 }
