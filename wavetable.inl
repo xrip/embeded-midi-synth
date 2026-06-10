@@ -12,13 +12,39 @@
 //   * INLINE            (e.g. `static inline`)
 //   * SOUND_FREQUENCY   (output sample rate; must equal the bank's output_rate)
 // and must define the global g_bank and call wt_set_bank() once.
+//
+// RP2040 (Cortex-M0+) integration notes — these belong in general-midi.c.inl /
+// the emulator, where they can be measured, and are intentionally NOT compiled
+// here (this header stays portable and host-A/B-validated):
+//   * RAM-place hot code: define WT_RAMFUNC(name) -> __not_in_flash_func(name)
+//     before including; already applied to midi_sample_stereo and parse_midi.
+//     Keep the LUTs (wt_luts.h) and g_voices in RAM too. The bank PCM is large
+//     and stays in flash via .incbin (4-byte aligned, NOT __not_in_flash).
+//   * Per-sample interpolation can use SIO INTERP0 blend (s0+((s1-s0)*a)>>8) —
+//     hardware but 8-bit alpha (coarser, not bit-exact) and per-core state. See
+//     the lerp site in midi_sample_stereo.
+//   * Hardware divider: every divisor in this engine is a compile-time constant
+//     (gcc already reciprocates them), so the SIO divider buys little; if it
+//     ever shows up hot, pico-sdk routes __aeabi_idiv to it (ensure divider
+//     save/restore if the render runs in an IRQ).
+//   * The real bottleneck at high polyphony is XIP flash: two pcm[] reads per
+//     sample per voice. Profile the XIP cache first; if it thrashes, cache each
+//     active loop region in RAM or relocate hot instruments at note-on.
 #pragma once
 
-#include <math.h>   // init-time LUT build only (never on the audio path)
 #include <string.h>
-
+#ifdef WT_RUNTIME_LUTS
+#include <math.h>   // only the reference LUT build needs libm; baked build does not
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
+#endif
+#endif
+
+// Place hot functions in RAM on device (XIP flash is slow on a cache miss). The
+// includer (e.g. general-midi.c.inl on RP2040) defines this to
+// __not_in_flash_func; on the host it is identity.
+#ifndef WT_RAMFUNC
+#define WT_RAMFUNC(name) name
 #endif
 
 #ifndef WT_MAX_VOICES
@@ -457,7 +483,7 @@ static void wt_channel_reamp(uint8_t channel) {
     }
 }
 
-static void parse_midi(const midi_command_t *m) {
+static void WT_RAMFUNC(parse_midi)(const midi_command_t *m) {
     uint8_t channel = m->command & 0x0f;
     wt_channel_t *ch = &g_channels[channel];
     switch (m->command >> 4) {
@@ -647,7 +673,7 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
     v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
 }
 
-INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
+INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
 
     for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
@@ -673,6 +699,13 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         // never overflows: |s1-s0| <= 65535 and frac <= 32767 keep it under
         // INT32_MAX. With full Q16 frac, loud transients (|s1-s0| > 32768, e.g.
         // saw-edge basses, cymbal noise) overflowed into full-scale spikes.
+        //
+        // RP2040 device option (validate on-device, not done here): SIO INTERP0
+        // blend mode does s0 + ((s1-s0)*alpha)>>8 in hardware. Caveats: blend
+        // alpha is 8-bit (vs the 16-bit frac here) so it is coarser and NOT
+        // bit-exact; interpolator state is per-core, so the render must own its
+        // core or save/restore. The two pcm[] reads below hit XIP flash and are
+        // the real per-voice cost at high polyphony (see integration notes).
         uint32_t i0 = v->frame_pos;
         int32_t s0 = v->pcm[i0];
         uint32_t i1 = i0 + 1;
