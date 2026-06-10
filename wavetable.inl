@@ -309,7 +309,10 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     v->pcm = g_bank.pcm + w->pcm_offset;
     v->frame_count = w->frame_count;
-    if (rg->flags & GM_RGN_LOOPED) {  // honor DLS loop for melodic and drums alike
+    // Melodic notes loop (sustain loop); GM percussion is one-shot — the DLS
+    // drum loop is a sustain loop never meant for the short, self-contained
+    // drum hits, and looping their tails turns noise into a buzzy "sand" tone.
+    if (!v->percussion && (rg->flags & GM_RGN_LOOPED)) {
         v->looped = 1;
         v->loop_start = rg->loop_start;
         v->loop_end = rg->loop_start + rg->loop_length;
