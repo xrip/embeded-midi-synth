@@ -257,16 +257,22 @@ static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents_q8) {
                   : -(((-total_cents_q8) + WT_CENTS_PER_OCT_Q8 - 1) / WT_CENTS_PER_OCT_Q8);
     int rem = total_cents_q8 - oct * WT_CENTS_PER_OCT_Q8; // 0..307199
     int idx = rem >> 8;                                   // 0..1199
-    int frac = rem & 255;
+    uint32_t frac = (uint32_t) (rem & 255);
     uint32_t f0 = g_pow2_cents_q16[idx];
     uint32_t f1 = idx < 1199 ? g_pow2_cents_q16[idx + 1] : (g_pow2_cents_q16[0] << 1); // 2^1
-    uint32_t f = f0 + (uint32_t) (((int64_t) (f1 - f0) * frac) >> 8);
+    // f1-f0 <= ~76 within one octave, so this blend fits a 32-bit product.
+    uint32_t f = f0 + (((f1 - f0) * frac) >> 8);
     if (oct > 8) oct = 8;
     if (oct < -8) oct = -8;
     if (oct >= 0) f <<= oct; else f >>= (-oct);
-    uint64_t step = ((uint64_t) base_step_q16 * f) >> 16;
-    if (step > 0xFFFFFFFFu) step = 0xFFFFFFFFu;
-    return (uint32_t) step;
+    // step = base_step * f >> 16. 492/495 GM.DLS waves are native 22050 Hz, so
+    // base_step == 1.0 and step == f exactly (no multiply). Only resampled waves
+    // take the product, computed from 16x16 partials so Cortex-M0 never calls
+    // __aeabi_lmul here — the result equals the old uint64 (a*b)>>16 exactly.
+    if (base_step_q16 == GM_ONE_Q16) return f;
+    uint32_t alo = base_step_q16 & 0xFFFFu, ahi = base_step_q16 >> 16;
+    uint32_t blo = f & 0xFFFFu, bhi = f >> 16;
+    return ((ahi * bhi) << 16) + ahi * blo + alo * bhi + ((alo * blo) >> 16);
 }
 
 // Pitch-bend contribution in Q8 cents. range_cents is integer cents.
