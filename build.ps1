@@ -22,14 +22,20 @@ if (($env:PATH -split ';') -notcontains $ClionMingwBin) {
     $env:PATH = "$ClionMingwBin;$env:PATH"
 }
 
-if ($Target -eq 'gm_dls_player') {
+$HostTargets = @{
+    'gm_dls_player' = 'gm_dls_player.c'
+    'dls_pack'      = 'dls_pack.c'
+    'wt_render'     = 'wt_render.c'
+}
+
+if ($HostTargets.ContainsKey($Target)) {
     if (-not (Test-Path $GccExe)) {
         throw "Compiler not found: $GccExe"
     }
 
     New-Item -ItemType Directory -Force -Path $StandaloneBuildDir | Out-Null
-    $OutputExe = Join-Path $StandaloneBuildDir 'gm_dls_player.exe'
-    $Source = Join-Path $RepoRoot 'gm_dls_player.c'
+    $OutputExe = Join-Path $StandaloneBuildDir ($Target + '.exe')
+    $Source = Join-Path $RepoRoot $HostTargets[$Target]
 
     $CommonArgs = @(
         '-std=c2x',

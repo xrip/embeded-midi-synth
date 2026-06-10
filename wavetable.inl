@@ -1,0 +1,455 @@
+// Fixed-point GM wavetable voice engine.
+//
+// Plays the packed flash soundbank (gm_bank.h) with no floating point on the
+// hot path: interpolated sample playback, per-region pitch/loops, a single
+// EG1-style amplitude envelope (Q16), and stereo panning. Designed to drop into
+// the emulator's general-midi.c.inl in place of the synthesized voices and to
+// be compiled on the host by wt_render.c for A/B validation against the
+// double-precision golden reference (gm_dls_player.c).
+//
+// The includer must provide before including:
+//   * gm_bank.h
+//   * INLINE            (e.g. `static inline`)
+//   * SOUND_FREQUENCY   (output sample rate; must equal the bank's output_rate)
+// and must define the global g_bank and call wt_set_bank() once.
+#pragma once
+
+#include <math.h>   // init-time LUT build only (never on the audio path)
+#include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifndef WT_MAX_VOICES
+#define WT_MAX_VOICES 32
+#endif
+#define WT_MIDI_CHANNELS 16
+#define WT_PITCH_BEND_RANGE_SEMITONES 2
+
+#ifndef WT_MIDI_COMMAND_T_DEFINED
+#define WT_MIDI_COMMAND_T_DEFINED
+typedef struct __attribute__((packed)) {
+    uint8_t command;
+    uint8_t note;
+    uint8_t velocity;
+    uint8_t other;
+} midi_command_t;
+#endif
+
+enum { WT_ATTACK, WT_DECAY, WT_SUSTAIN, WT_RELEASE };
+
+typedef struct {
+    uint8_t  active;
+    uint8_t  channel;
+    uint8_t  note;
+    uint8_t  velocity;
+    uint8_t  percussion;
+    uint8_t  sustained;
+    uint8_t  key_group;
+    uint8_t  amp_stage;
+
+    const int16_t *pcm;       // wave PCM base (g_bank.pcm + wave->pcm_offset)
+    uint32_t frame_count;
+    uint32_t loop_start;
+    uint32_t loop_end;        // loop_start + loop_length
+    uint8_t  looped;
+
+    uint32_t frame_pos;       // integer frame index
+    uint32_t frac;            // Q16 fractional position
+    uint32_t step_q16;        // frames per output sample, Q16.16
+    uint32_t base_step_q16;   // pre-pitch wave step (for re-pitch on bend)
+    uint8_t  root;            // resolved root key
+    int16_t  fine_cents;      // region fine tune
+
+    int32_t  env_q16;         // current envelope amplitude (Q16, 0..65536)
+    int32_t  sustain_q16;
+    int32_t  attack_step_q16;
+    int32_t  decay_coef_q16;
+    int32_t  release_coef_q16;
+
+    int32_t  region_gain_q16; // baked region attenuation gain (Q16)
+    int32_t  amp_q16;         // velocity * region gain * channel vol/expr (Q16)
+    int16_t  pan_l_q15;
+    int16_t  pan_r_q15;
+    uint32_t age;
+} wt_voice_t;
+
+typedef struct {
+    uint8_t program;
+    uint8_t volume;
+    uint8_t expression;
+    uint8_t pan;
+    uint8_t bank_msb;
+    uint8_t bank_lsb;
+    uint8_t sustain;
+    int     pitch_bend;       // 0..16383, center 8192
+} wt_channel_t;
+
+static gm_bank_view_t g_bank;
+static wt_voice_t  g_voices[WT_MAX_VOICES];
+static wt_channel_t g_channels[WT_MIDI_CHANNELS];
+static uint32_t g_next_age;
+
+// 2^(cents/1200) in Q16 for one octave of cents; octaves applied by shifting.
+static uint32_t g_pow2_cents_q16[1200];
+static int16_t  g_pan_l_q15[128];
+static int16_t  g_pan_r_q15[128];
+
+static void wt_build_luts(void) {
+    for (int c = 0; c < 1200; ++c) {
+        g_pow2_cents_q16[c] = (uint32_t) lround(pow(2.0, (double) c / 1200.0) * 65536.0);
+    }
+    for (int p = 0; p < 128; ++p) {
+        double a = (double) p / 127.0 * (M_PI * 0.5);
+        g_pan_l_q15[p] = (int16_t) lround(cos(a) * 32767.0);
+        g_pan_r_q15[p] = (int16_t) lround(sin(a) * 32767.0);
+    }
+}
+
+static void wt_engine_reset(void) {
+    memset(g_voices, 0, sizeof(g_voices));
+    g_next_age = 0;
+    for (int i = 0; i < WT_MIDI_CHANNELS; ++i) {
+        g_channels[i].program = 0;
+        g_channels[i].volume = 100;
+        g_channels[i].expression = 127;
+        g_channels[i].pan = 64;
+        g_channels[i].bank_msb = 0;
+        g_channels[i].bank_lsb = 0;
+        g_channels[i].sustain = 0;
+        g_channels[i].pitch_bend = 8192;
+    }
+}
+
+static void wt_set_bank(const void *blob) {
+    gm_bank_view(blob, &g_bank);
+    wt_build_luts();
+    wt_engine_reset();
+}
+
+// ---- bank lookup (integer ports of dls_find_instrument / dls_find_region) ----
+
+static const gm_instrument_t *wt_find_instrument(uint32_t dls_bank, uint32_t program) {
+    const gm_instrument_t *fb_program = NULL;
+    const gm_instrument_t *fb_piano = NULL;
+    uint32_t n = g_bank.header->instrument_count;
+    for (uint32_t i = 0; i < n; ++i) {
+        const gm_instrument_t *ins = &g_bank.instruments[i];
+        if (ins->bank == dls_bank && ins->program == program) return ins;
+        if (ins->bank == 0 && ins->program == program) fb_program = ins;
+        if (ins->bank == 0 && ins->program == 0) fb_piano = ins;
+    }
+    if (dls_bank & DLS_DRUM_BANK) {
+        for (uint32_t i = 0; i < n; ++i) {
+            const gm_instrument_t *ins = &g_bank.instruments[i];
+            if (ins->bank == DLS_DRUM_BANK && ins->program == 0) return ins;
+        }
+    }
+    return fb_program ? fb_program : fb_piano;
+}
+
+static const gm_region_t *wt_find_region(const gm_instrument_t *ins, uint8_t note, uint8_t velocity) {
+    const gm_region_t *nearest = NULL;
+    int nearest_distance = 1000;
+    for (uint32_t i = 0; i < ins->region_count; ++i) {
+        const gm_region_t *rg = &g_bank.regions[ins->region_first + i];
+        if (note >= rg->key_low && note <= rg->key_high &&
+            velocity >= rg->vel_low && velocity <= rg->vel_high) {
+            return rg;
+        }
+        int distance = 0;
+        if (note < rg->key_low) distance = (int) rg->key_low - note;
+        if (note > rg->key_high) distance = note - (int) rg->key_high;
+        if (!nearest || distance < nearest_distance) {
+            nearest = rg;
+            nearest_distance = distance;
+        }
+    }
+    return nearest;
+}
+
+// ---- voice helpers -----------------------------------------------------------
+
+static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents) {
+    int oct = total_cents >= 0 ? total_cents / 1200 : -(((-total_cents) + 1199) / 1200);
+    int rem = total_cents - oct * 1200; // 0..1199
+    uint32_t f = g_pow2_cents_q16[rem];
+    if (oct > 8) oct = 8;
+    if (oct < -8) oct = -8;
+    if (oct >= 0) f <<= oct; else f >>= (-oct);
+    uint64_t step = ((uint64_t) base_step_q16 * f) >> 16;
+    if (step > 0xFFFFFFFFu) step = 0xFFFFFFFFu;
+    return (uint32_t) step;
+}
+
+static int wt_channel_bend_cents(const wt_channel_t *ch) {
+    // (bend-8192)/8192 * range_semitones * 100 cents, integer.
+    return (ch->pitch_bend - 8192) * (WT_PITCH_BEND_RANGE_SEMITONES * 100) / 8192;
+}
+
+// amp = (velocity/127) * region_gain * (volume/127) * (expression/127), Q16.
+// velocity/127 approximated as velocity<<9 (127<<9 = 65024 ~ 0.992).
+static void wt_update_amp(wt_voice_t *v) {
+    const wt_channel_t *ch = &g_channels[v->channel];
+    int64_t amp = (int64_t) (v->velocity << 9);
+    amp = (amp * v->region_gain_q16) >> 16;
+    amp = (amp * (ch->volume << 9)) >> 16;
+    amp = (amp * (ch->expression << 9)) >> 16;
+    v->amp_q16 = (int32_t) amp;
+}
+
+static void wt_update_pitch(wt_voice_t *v) {
+    int total_cents = (v->note - v->root) * 100 + v->fine_cents + wt_channel_bend_cents(&g_channels[v->channel]);
+    v->step_q16 = wt_pitch_step(v->base_step_q16, total_cents);
+}
+
+static wt_voice_t *wt_alloc_voice(void) {
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        if (!g_voices[i].active) return &g_voices[i];
+    }
+    // Steal the quietest voice.
+    wt_voice_t *q = &g_voices[0];
+    for (int i = 1; i < WT_MAX_VOICES; ++i) {
+        if (g_voices[i].env_q16 < q->env_q16 ||
+            (g_voices[i].env_q16 == q->env_q16 && g_voices[i].age < q->age)) {
+            q = &g_voices[i];
+        }
+    }
+    return q;
+}
+
+static void wt_release_voice(wt_voice_t *v) {
+    if (!v->active || v->percussion) return;
+    v->sustained = 0;
+    v->amp_stage = WT_RELEASE;
+}
+
+static void wt_note_off(uint8_t channel, uint8_t note) {
+    if (channel == 9) return; // drums are one-shots
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        wt_voice_t *v = &g_voices[i];
+        if (!v->active || v->channel != channel || v->note != note) continue;
+        if (g_channels[channel].sustain) v->sustained = 1;
+        else wt_release_voice(v);
+    }
+}
+
+static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
+    wt_channel_t *ch = &g_channels[channel];
+    uint32_t bank_number = ((uint32_t) ch->bank_msb << 8) | ch->bank_lsb;
+    uint32_t dls_bank = channel == 9 ? (DLS_DRUM_BANK | bank_number) : bank_number;
+
+    const gm_instrument_t *ins = wt_find_instrument(dls_bank, ch->program);
+    if (!ins) return;
+    const gm_region_t *rg = wt_find_region(ins, note, velocity);
+    if (!rg || rg->wave_index >= g_bank.header->wave_count) return;
+    const gm_wave_t *w = &g_bank.waves[rg->wave_index];
+    if (w->frame_count < 2) return;
+
+    // Voice stealing: retrigger same note; drum exclusive key groups.
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        wt_voice_t *v = &g_voices[i];
+        if (!v->active || v->channel != channel) continue;
+        if (v->note == note && !v->percussion) v->active = 0;
+        else if (channel == 9 && rg->key_group != 0 && v->key_group == rg->key_group) v->active = 0;
+    }
+
+    wt_voice_t *v = wt_alloc_voice();
+    memset(v, 0, sizeof(*v));
+    v->active = 1;
+    v->percussion = channel == 9;
+    v->channel = channel;
+    v->note = note;
+    v->velocity = velocity;
+    v->key_group = rg->key_group;
+    v->age = g_next_age++;
+
+    v->pcm = g_bank.pcm + w->pcm_offset;
+    v->frame_count = w->frame_count;
+    if (!v->percussion && (rg->flags & GM_RGN_LOOPED)) {
+        v->looped = 1;
+        v->loop_start = rg->loop_start;
+        v->loop_end = rg->loop_start + rg->loop_length;
+    }
+    v->base_step_q16 = w->base_step_q16;
+    v->root = (rg->flags & GM_RGN_ROOT_FROM_NOTE) ? note : rg->root_key;
+    v->fine_cents = rg->fine_cents;
+    v->region_gain_q16 = rg->gain_q16;
+    wt_update_pitch(v);
+    wt_update_amp(v);
+
+    v->pan_l_q15 = g_pan_l_q15[ch->pan];
+    v->pan_r_q15 = g_pan_r_q15[ch->pan];
+
+    v->sustain_q16 = rg->sustain_q16;
+    v->attack_step_q16 = rg->attack_step_q16;
+    v->decay_coef_q16 = rg->decay_coef_q16;
+    v->release_coef_q16 = rg->release_coef_q16;
+    if (rg->attack_step_q16 >= GM_ONE_Q16) {
+        v->env_q16 = GM_ONE_Q16;
+        v->amp_stage = WT_DECAY;
+    } else {
+        v->env_q16 = 0;
+        v->amp_stage = WT_ATTACK;
+    }
+}
+
+// Recompute pitch for all sounding voices on a channel (pitch bend).
+static void wt_channel_repitch(uint8_t channel) {
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        wt_voice_t *v = &g_voices[i];
+        if (v->active && v->channel == channel) wt_update_pitch(v);
+    }
+}
+
+// Recompute amplitude for all sounding voices on a channel (volume/expression).
+static void wt_channel_reamp(uint8_t channel) {
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        wt_voice_t *v = &g_voices[i];
+        if (v->active && v->channel == channel) wt_update_amp(v);
+    }
+}
+
+static void parse_midi(const midi_command_t *m) {
+    uint8_t channel = m->command & 0x0f;
+    wt_channel_t *ch = &g_channels[channel];
+    switch (m->command >> 4) {
+        case 0x9:
+            if (m->velocity) wt_note_on(channel, m->note, m->velocity);
+            else wt_note_off(channel, m->note);
+            break;
+        case 0x8:
+            wt_note_off(channel, m->note);
+            break;
+        case 0xb:
+            switch (m->note) {
+                case 0x00: ch->bank_msb = m->velocity & 0x7f; break;
+                case 0x20: ch->bank_lsb = m->velocity & 0x7f; break;
+                case 0x07: ch->volume = m->velocity & 0x7f; wt_channel_reamp(channel); break;
+                case 0x0a: ch->pan = m->velocity & 0x7f; break;
+                case 0x0b: ch->expression = m->velocity & 0x7f; wt_channel_reamp(channel); break;
+                case 0x40:
+                    if (m->velocity >= 64) {
+                        ch->sustain = 1;
+                    } else {
+                        ch->sustain = 0;
+                        for (int i = 0; i < WT_MAX_VOICES; ++i) {
+                            wt_voice_t *v = &g_voices[i];
+                            if (v->active && v->channel == channel && v->sustained) wt_release_voice(v);
+                        }
+                    }
+                    break;
+                case 0x78:
+                    for (int i = 0; i < WT_MAX_VOICES; ++i)
+                        if (g_voices[i].channel == channel) g_voices[i].active = 0;
+                    break;
+                case 0x7b:
+                    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+                        wt_voice_t *v = &g_voices[i];
+                        if (v->active && v->channel == channel) {
+                            if (v->percussion) v->active = 0; else wt_release_voice(v);
+                        }
+                    }
+                    break;
+                case 0x79:
+                    ch->volume = 100; ch->expression = 127; ch->pan = 64;
+                    ch->bank_msb = 0; ch->bank_lsb = 0; ch->pitch_bend = 8192; ch->sustain = 0;
+                    wt_channel_reamp(channel);
+                    wt_channel_repitch(channel);
+                    break;
+                default: break;
+            }
+            break;
+        case 0xc:
+            ch->program = m->note & 0x7f;
+            break;
+        case 0xe:
+            ch->pitch_bend = ((int) m->velocity << 7) | (int) m->note;
+            wt_channel_repitch(channel);
+            break;
+        default: break;
+    }
+}
+
+// ---- audio path --------------------------------------------------------------
+
+INLINE void wt_advance_env(wt_voice_t *v) {
+    switch (v->amp_stage) {
+        case WT_ATTACK:
+            v->env_q16 += v->attack_step_q16;
+            if (v->env_q16 >= GM_ONE_Q16) {
+                v->env_q16 = GM_ONE_Q16;
+                v->amp_stage = WT_DECAY;
+            }
+            break;
+        case WT_DECAY:
+            if (v->env_q16 > v->sustain_q16) {
+                int32_t d = v->env_q16 - v->sustain_q16;
+                v->env_q16 = v->sustain_q16 + (int32_t) (((int64_t) d * v->decay_coef_q16) >> 16);
+                if (v->env_q16 <= v->sustain_q16 + 6) {
+                    v->env_q16 = v->sustain_q16;
+                    v->amp_stage = WT_SUSTAIN;
+                }
+            } else {
+                v->env_q16 = v->sustain_q16;
+                v->amp_stage = WT_SUSTAIN;
+            }
+            break;
+        case WT_RELEASE:
+            v->env_q16 = (int32_t) (((int64_t) v->env_q16 * v->release_coef_q16) >> 16);
+            if (v->env_q16 < 6) v->active = 0;
+            break;
+        default: break;
+    }
+}
+
+INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
+    int32_t l = 0, r = 0;
+
+    for (int i = 0; i < WT_MAX_VOICES; ++i) {
+        wt_voice_t *v = &g_voices[i];
+        if (!v->active) continue;
+
+        wt_advance_env(v);
+        if (!v->active) continue;
+
+        // Linear interpolation.
+        uint32_t i0 = v->frame_pos;
+        int32_t s0 = v->pcm[i0];
+        uint32_t i1 = i0 + 1;
+        int32_t s1 = (i1 < v->frame_count) ? v->pcm[i1] : s0;
+        int32_t s = s0 + (((s1 - s0) * (int32_t) v->frac) >> 16);
+
+        int32_t gain = (int32_t) (((int64_t) v->env_q16 * v->amp_q16) >> 16); // Q16
+        int32_t val = (int32_t) (((int64_t) s * gain) >> 16);
+
+        l += (val * v->pan_l_q15) >> 15;
+        r += (val * v->pan_r_q15) >> 15;
+
+        // Advance position.
+        uint32_t acc = v->frac + (v->step_q16 & 0xFFFF);
+        v->frame_pos += (v->step_q16 >> 16) + (acc >> 16);
+        v->frac = acc & 0xFFFF;
+
+        if (v->looped) {
+            while (v->frame_pos >= v->loop_end) v->frame_pos -= (v->loop_end - v->loop_start);
+        } else if (v->frame_pos + 1 >= v->frame_count) {
+            v->active = 0;
+        }
+    }
+
+    // Master gain ~0.45 then clamp.
+    l = (l * 29491) >> 16;
+    r = (r * 29491) >> 16;
+    if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
+    if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+    *out_l = (int16_t) l;
+    *out_r = (int16_t) r;
+}
+
+INLINE int wt_has_active_voices(void) {
+    for (int i = 0; i < WT_MAX_VOICES; ++i)
+        if (g_voices[i].active) return 1;
+    return 0;
+}
