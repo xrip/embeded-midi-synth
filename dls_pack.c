@@ -75,6 +75,28 @@ static int16_t clamp_i16(long v) {
     return (int16_t) v;
 }
 
+static double clampd(double v, double lo, double hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// Bake the DLS LFO->pitch vibrato (per-instrument articulation) into a region.
+// Depth is kept at full DLS range (some SFX like "Wind" use ~725 cents on
+// purpose); the engine gates the LFO with a proper per-note delay rather than
+// the reference's broken global-age gate.
+static void bake_lfo(const dls_articulation_t *art, uint32_t rate, gm_region_t *out) {
+    if (art->lfo_pitch_cents == 0.0 && art->mod_lfo_pitch_cents == 0.0) return;
+
+    double freq = art->has_lfo_frequency ? dls_absolute_cents_to_hz(art->lfo_frequency) : 5.0;
+    freq = clampd(freq, 0.01, 40.0);
+    double delay_s = art->has_lfo_delay ? dls_timecents_to_seconds(art->lfo_delay) : 0.0;
+
+    out->lfo_phase_inc = (uint32_t) llround(freq / (double) rate * 4294967296.0);
+    out->lfo_delay = (uint32_t) llround(delay_s * (double) rate);
+    out->lfo_depth_q8 = (int32_t) llround(art->lfo_pitch_cents * 256.0);
+    out->lfo_mod_depth_q8 = (int32_t) llround(art->mod_lfo_pitch_cents * 256.0);
+    out->flags |= GM_RGN_HAS_LFO;
+}
+
 // ---- packing -----------------------------------------------------------------
 
 // The fallback envelope advances every 256 samples by an exponential approach
@@ -237,6 +259,7 @@ int main(int argc, char **argv) {
             }
 
             bake_eg1(&ins->articulation, (uint8_t) ins->program, output_rate, out);
+            bake_lfo(&ins->articulation, output_rate, out);
             if (!out->has_eg1) regions_no_eg1++;
             region_count++;
         }
@@ -279,6 +302,23 @@ int main(int argc, char **argv) {
     ok &= fwrite(waves.data, sizeof(gm_wave_t), waves.count, f) == waves.count;
     ok &= fwrite(pcm.data, sizeof(int16_t), pcm.count, f) == pcm.count;
     if (fclose(f) != 0) ok = 0;
+
+    // Diagnostic: how prevalent are DLS modulators we currently drop?
+    uint32_t ins_lfo = 0, ins_modlfo = 0, ins_filter = 0;
+    double lfo_min = 1e9, lfo_max = -1e9;
+    for (size_t i = 0; i < bank.instrument_count; ++i) {
+        const dls_instrument_t *in = &bank.instruments[i];
+        const dls_articulation_t *a = &in->articulation;
+        if (a->lfo_pitch_cents != 0.0) {
+            ins_lfo++;
+            if (a->lfo_pitch_cents < lfo_min) lfo_min = a->lfo_pitch_cents;
+            if (a->lfo_pitch_cents > lfo_max) lfo_max = a->lfo_pitch_cents;
+        }
+        if (a->mod_lfo_pitch_cents != 0.0) ins_modlfo++;
+        if (a->has_filter_cutoff) ins_filter++;
+    }
+    fprintf(stderr, "  modulators: %u/%zu LFO vibrato (depth %.1f..%.1f cents), %u mod-wheel LFO, %u filter\n",
+            ins_lfo, bank.instrument_count, lfo_min, lfo_max, ins_modlfo, ins_filter);
 
     double pcm_mb = (double) (pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
     double total_mb = (double) (hdr.off_pcm + pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);

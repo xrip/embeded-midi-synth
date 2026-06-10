@@ -19,7 +19,7 @@
 #define GM_BANK_MAGIC1 'M'
 #define GM_BANK_MAGIC2 'W'
 #define GM_BANK_MAGIC3 'B'
-#define GM_BANK_VERSION 1u
+#define GM_BANK_VERSION 2u
 
 // Fixed-point scales.
 #define GM_Q16 16          // gain, envelope coeffs, sustain: Q16 (65536 = 1.0)
@@ -35,6 +35,7 @@ typedef struct {
 // Region flags
 #define GM_RGN_LOOPED        0x01u  // loop_start/loop_length are valid
 #define GM_RGN_ROOT_FROM_NOTE 0x02u // no wsmp: engine uses played note as root
+#define GM_RGN_HAS_LFO       0x04u  // lfo_* fields drive pitch vibrato
 
 typedef struct {
     uint32_t gain_q16;          // baked attenuation gain (Q16)
@@ -44,6 +45,10 @@ typedef struct {
     uint32_t sustain_q16;       // sustain level (Q16)
     uint32_t loop_start;        // frames (valid if GM_RGN_LOOPED)
     uint32_t loop_length;       // frames (valid if GM_RGN_LOOPED)
+    uint32_t lfo_phase_inc;     // vibrato LFO phase step per sample (full turn = 2^32)
+    uint32_t lfo_delay;         // samples before the LFO starts
+    int32_t  lfo_depth_q8;      // base vibrato depth, cents in Q8 (cents*256)
+    int32_t  lfo_mod_depth_q8;  // extra depth scaled by mod wheel, cents Q8
     int16_t  fine_cents;        // pitch fine tune, cents
     uint16_t wave_index;        // index into wave table
     uint8_t  key_low;
@@ -54,7 +59,7 @@ typedef struct {
     uint8_t  key_group;         // DLS exclusive group (0 = none)
     uint8_t  has_eg1;           // 1 = use baked EG1, 0 = engine fallback envelope
     uint8_t  flags;             // GM_RGN_* bits
-} gm_region_t;                  // 40 bytes
+} gm_region_t;                  // 56 bytes
 
 typedef struct {
     uint32_t bank;          // DLS bank number; high bit (0x80000000) = drum bank
@@ -78,7 +83,7 @@ typedef struct {
 } gm_bank_header_t;             // 44 bytes
 
 _Static_assert(sizeof(gm_wave_t) == 12, "gm_wave_t layout");
-_Static_assert(sizeof(gm_region_t) == 40, "gm_region_t layout");
+_Static_assert(sizeof(gm_region_t) == 56, "gm_region_t layout");
 _Static_assert(sizeof(gm_instrument_t) == 12, "gm_instrument_t layout");
 _Static_assert(sizeof(gm_bank_header_t) == 44, "gm_bank_header_t layout");
 

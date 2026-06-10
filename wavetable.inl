@@ -61,6 +61,15 @@ typedef struct {
     uint32_t base_step_q16;   // pre-pitch wave step (for re-pitch on bend)
     uint8_t  root;            // resolved root key
     int16_t  fine_cents;      // region fine tune
+    int32_t  static_cents;    // note/fine/bend pitch offset (vibrato added on top)
+
+    uint8_t  has_lfo;
+    uint32_t lfo_phase;       // current phase (full turn = 2^32)
+    uint32_t lfo_phase_inc;
+    uint32_t lfo_delay;       // samples before LFO starts
+    int32_t  lfo_depth_q8;    // cents Q8
+    int32_t  lfo_mod_depth_q8;// cents Q8 (scaled by mod wheel)
+    uint32_t samples_played;
 
     int32_t  env_q16;         // current envelope amplitude (Q16, 0..65536)
     int32_t  sustain_q16;
@@ -83,7 +92,11 @@ typedef struct {
     uint8_t bank_msb;
     uint8_t bank_lsb;
     uint8_t sustain;
+    uint8_t modulation;       // CC1 mod wheel, 0..127
+    uint8_t rpn_msb;          // 127 = none selected
+    uint8_t rpn_lsb;
     int     pitch_bend;       // 0..16383, center 8192
+    int     bend_range_cents; // pitch bend range, in cents (default 200 = ±2 st)
 } wt_channel_t;
 
 static gm_bank_view_t g_bank;
@@ -92,9 +105,12 @@ static wt_channel_t g_channels[WT_MIDI_CHANNELS];
 static uint32_t g_next_age;
 
 // 2^(cents/1200) in Q16 for one octave of cents; octaves applied by shifting.
+#define WT_SIN_BITS 10
+#define WT_SIN_SIZE (1 << WT_SIN_BITS)
 static uint32_t g_pow2_cents_q16[1200];
 static int16_t  g_pan_l_q15[128];
 static int16_t  g_pan_r_q15[128];
+static int16_t  g_sin_q15[WT_SIN_SIZE];
 
 static void wt_build_luts(void) {
     for (int c = 0; c < 1200; ++c) {
@@ -104,6 +120,9 @@ static void wt_build_luts(void) {
         double a = (double) p / 127.0 * (M_PI * 0.5);
         g_pan_l_q15[p] = (int16_t) lround(cos(a) * 32767.0);
         g_pan_r_q15[p] = (int16_t) lround(sin(a) * 32767.0);
+    }
+    for (int i = 0; i < WT_SIN_SIZE; ++i) {
+        g_sin_q15[i] = (int16_t) lround(sin(2.0 * M_PI * (double) i / (double) WT_SIN_SIZE) * 32767.0);
     }
 }
 
@@ -118,7 +137,11 @@ static void wt_engine_reset(void) {
         g_channels[i].bank_msb = 0;
         g_channels[i].bank_lsb = 0;
         g_channels[i].sustain = 0;
+        g_channels[i].modulation = 0;
+        g_channels[i].rpn_msb = 127;
+        g_channels[i].rpn_lsb = 127;
         g_channels[i].pitch_bend = 8192;
+        g_channels[i].bend_range_cents = WT_PITCH_BEND_RANGE_SEMITONES * 100;
     }
 }
 
@@ -171,10 +194,20 @@ static const gm_region_t *wt_find_region(const gm_instrument_t *ins, uint8_t not
 
 // ---- voice helpers -----------------------------------------------------------
 
-static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents) {
-    int oct = total_cents >= 0 ? total_cents / 1200 : -(((-total_cents) + 1199) / 1200);
-    int rem = total_cents - oct * 1200; // 0..1199
-    uint32_t f = g_pow2_cents_q16[rem];
+// Pitch factor for a cents offset given in Q8 (cents*256), with sub-cent
+// precision via linear interpolation of the per-cent 2^(c/1200) LUT. Sub-cent
+// accuracy keeps long sustained / vibrato notes from drifting audibly.
+#define WT_CENTS_PER_OCT_Q8 (1200 * 256)
+static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents_q8) {
+    int oct = total_cents_q8 >= 0
+                  ? total_cents_q8 / WT_CENTS_PER_OCT_Q8
+                  : -(((-total_cents_q8) + WT_CENTS_PER_OCT_Q8 - 1) / WT_CENTS_PER_OCT_Q8);
+    int rem = total_cents_q8 - oct * WT_CENTS_PER_OCT_Q8; // 0..307199
+    int idx = rem >> 8;                                   // 0..1199
+    int frac = rem & 255;
+    uint32_t f0 = g_pow2_cents_q16[idx];
+    uint32_t f1 = idx < 1199 ? g_pow2_cents_q16[idx + 1] : (g_pow2_cents_q16[0] << 1); // 2^1
+    uint32_t f = f0 + (uint32_t) (((int64_t) (f1 - f0) * frac) >> 8);
     if (oct > 8) oct = 8;
     if (oct < -8) oct = -8;
     if (oct >= 0) f <<= oct; else f >>= (-oct);
@@ -183,9 +216,14 @@ static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents) {
     return (uint32_t) step;
 }
 
-static int wt_channel_bend_cents(const wt_channel_t *ch) {
-    // (bend-8192)/8192 * range_semitones * 100 cents, integer.
-    return (ch->pitch_bend - 8192) * (WT_PITCH_BEND_RANGE_SEMITONES * 100) / 8192;
+// Pitch-bend contribution in Q8 cents. range_cents is integer cents.
+static int wt_channel_bend_cents_q8(const wt_channel_t *ch) {
+    // (bend-8192)/8192 * range, in Q8: == (bend-8192)*range_cents*256/8192.
+    return (ch->pitch_bend - 8192) * ch->bend_range_cents / 32;
+}
+
+static int wt_rpn_is_bend_range(const wt_channel_t *ch) {
+    return ch->rpn_msb == 0 && ch->rpn_lsb == 0;
 }
 
 // amp = (velocity/127) * region_gain * (volume/127) * (expression/127), Q16.
@@ -200,8 +238,10 @@ static void wt_update_amp(wt_voice_t *v) {
 }
 
 static void wt_update_pitch(wt_voice_t *v) {
-    int total_cents = (v->note - v->root) * 100 + v->fine_cents + wt_channel_bend_cents(&g_channels[v->channel]);
-    v->step_q16 = wt_pitch_step(v->base_step_q16, total_cents);
+    // static pitch offset in Q8 cents; vibrato is added on top in the render loop.
+    v->static_cents = ((v->note - v->root) * 100 + v->fine_cents) * 256
+                      + wt_channel_bend_cents_q8(&g_channels[v->channel]);
+    v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents);
 }
 
 static wt_voice_t *wt_alloc_voice(void) {
@@ -276,6 +316,14 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     v->root = (rg->flags & GM_RGN_ROOT_FROM_NOTE) ? note : rg->root_key;
     v->fine_cents = rg->fine_cents;
     v->region_gain_q16 = rg->gain_q16;
+    if (rg->flags & GM_RGN_HAS_LFO) {
+        v->has_lfo = 1;
+        v->lfo_phase = 0;
+        v->lfo_phase_inc = rg->lfo_phase_inc;
+        v->lfo_delay = rg->lfo_delay;
+        v->lfo_depth_q8 = rg->lfo_depth_q8;
+        v->lfo_mod_depth_q8 = rg->lfo_mod_depth_q8;
+    }
     wt_update_pitch(v);
     wt_update_amp(v);
 
@@ -325,10 +373,34 @@ static void parse_midi(const midi_command_t *m) {
         case 0xb:
             switch (m->note) {
                 case 0x00: ch->bank_msb = m->velocity & 0x7f; break;
+                case 0x01: ch->modulation = m->velocity & 0x7f; break;
                 case 0x20: ch->bank_lsb = m->velocity & 0x7f; break;
                 case 0x07: ch->volume = m->velocity & 0x7f; wt_channel_reamp(channel); break;
                 case 0x0a: ch->pan = m->velocity & 0x7f; break;
                 case 0x0b: ch->expression = m->velocity & 0x7f; wt_channel_reamp(channel); break;
+                case 0x65: ch->rpn_msb = m->velocity & 0x7f; break; // RPN MSB
+                case 0x64: ch->rpn_lsb = m->velocity & 0x7f; break; // RPN LSB
+                case 0x06: // data entry MSB -> whole semitones of bend range
+                    if (wt_rpn_is_bend_range(ch)) {
+                        ch->bend_range_cents = (m->velocity & 0x7f) * 100 + (ch->bend_range_cents % 100);
+                        wt_channel_repitch(channel);
+                    }
+                    break;
+                case 0x26: // data entry LSB -> cents of bend range
+                    if (wt_rpn_is_bend_range(ch)) {
+                        int cents = m->velocity & 0x7f; if (cents > 99) cents = 99;
+                        ch->bend_range_cents = (ch->bend_range_cents / 100) * 100 + cents;
+                        wt_channel_repitch(channel);
+                    }
+                    break;
+                case 0x60: // data increment (whole semitone)
+                    if (wt_rpn_is_bend_range(ch)) { ch->bend_range_cents += 100; wt_channel_repitch(channel); }
+                    break;
+                case 0x61: // data decrement
+                    if (wt_rpn_is_bend_range(ch) && ch->bend_range_cents >= 100) {
+                        ch->bend_range_cents -= 100; wt_channel_repitch(channel);
+                    }
+                    break;
                 case 0x40:
                     if (m->velocity >= 64) {
                         ch->sustain = 1;
@@ -355,6 +427,9 @@ static void parse_midi(const midi_command_t *m) {
                 case 0x79:
                     ch->volume = 100; ch->expression = 127; ch->pan = 64;
                     ch->bank_msb = 0; ch->bank_lsb = 0; ch->pitch_bend = 8192; ch->sustain = 0;
+                    ch->modulation = 0;
+                    ch->rpn_msb = 127; ch->rpn_lsb = 127;
+                    ch->bend_range_cents = WT_PITCH_BEND_RANGE_SEMITONES * 100;
                     wt_channel_reamp(channel);
                     wt_channel_repitch(channel);
                     break;
@@ -413,6 +488,17 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
 
         wt_advance_env(v);
         if (!v->active) continue;
+
+        // Pitch vibrato (DLS LFO -> pitch). Recompute step only while active.
+        if (v->has_lfo && v->samples_played >= v->lfo_delay) {
+            int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
+            int32_t depth_q8 = v->lfo_depth_q8 +
+                               (int32_t) (((int64_t) v->lfo_mod_depth_q8 * g_channels[v->channel].modulation) / 127);
+            int32_t lfo_cents_q8 = (int32_t) (((int64_t) s * depth_q8) >> 15); // Q15 * Q8 -> Q8 cents
+            v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + lfo_cents_q8);
+            v->lfo_phase += v->lfo_phase_inc;
+        }
+        v->samples_played++;
 
         // Linear interpolation.
         uint32_t i0 = v->frame_pos;
