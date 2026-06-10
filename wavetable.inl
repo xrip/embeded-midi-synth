@@ -246,10 +246,12 @@ static void wt_update_amp(wt_voice_t *v) {
     amp = (amp * v->region_gain_q16) >> 16;
     amp = (amp * g_cc_gain_q16[ch->volume]) >> 16;
     amp = (amp * g_cc_gain_q16[ch->expression]) >> 16;
-    // Some GM.DLS wsmp entries carry positive gain (boost). Cap the composite
-    // amp at 2.0 so |sample * gain| stays inside the int32 budget of the
-    // per-sample pan multiply.
-    if (amp > 2 * GM_ONE_Q16 - 1) amp = 2 * GM_ONE_Q16 - 1;
+    // Cap the composite amp just under unity (Q16). The census shows 0 of 1498
+    // regions boost (all wsmp gains are cuts), so this never attenuates real
+    // content; it guarantees env*amp stays < 2^32 and s*gain stays < 2^31, so
+    // both per-sample products are single 32x32->32 MULs (Cortex-M0 has no
+    // UMULL; an int64 product would call __aeabi_lmul on the hot path).
+    if (amp > GM_ONE_Q16 - 1) amp = GM_ONE_Q16 - 1;
     v->amp_q16 = (int32_t) amp;
 }
 
@@ -501,8 +503,9 @@ INLINE void wt_advance_env(wt_voice_t *v) {
             break;
         case WT_DECAY:
             // DLS decay: linear-in-dB ramp (constant per-sample multiplier)
-            // that clamps at the sustain level.
-            v->env_q16 = (int32_t) (((int64_t) v->env_q16 * v->decay_coef_q16) >> 16);
+            // that clamps at the sustain level. env<=65536 and coef<65536, so
+            // the product is < 2^32 and fits a single unsigned 32x32->32 MUL.
+            v->env_q16 = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) v->decay_coef_q16) >> 16);
             if (v->env_q16 <= v->sustain_q16) {
                 v->env_q16 = v->sustain_q16;
                 v->amp_stage = WT_SUSTAIN;
@@ -514,7 +517,7 @@ INLINE void wt_advance_env(wt_voice_t *v) {
             if (v->sustain_q16 < 8) v->active = 0;
             break;
         case WT_RELEASE:
-            v->env_q16 = (int32_t) (((int64_t) v->env_q16 * v->release_coef_q16) >> 16);
+            v->env_q16 = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) v->release_coef_q16) >> 16);
             if (v->env_q16 < 6) v->active = 0;
             break;
         default: break;
@@ -534,7 +537,7 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
             break;
         case WT_DECAY:
             // Same linear-in-dB ramp as EG1, clamped at the EG2 sustain level.
-            v->eg2_q16 = (int32_t) (((int64_t) v->eg2_q16 * v->eg2_decay_coef_q16) >> 16);
+            v->eg2_q16 = (int32_t) (((uint32_t) v->eg2_q16 * (uint32_t) v->eg2_decay_coef_q16) >> 16);
             if (v->eg2_q16 <= v->eg2_sustain_q16) {
                 v->eg2_q16 = v->eg2_sustain_q16;
                 v->eg2_stage = WT_SUSTAIN;
@@ -543,7 +546,7 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
         case WT_SUSTAIN:
             break;
         case WT_RELEASE:
-            v->eg2_q16 = (int32_t) (((int64_t) v->eg2_q16 * v->eg2_release_coef_q16) >> 16);
+            v->eg2_q16 = (int32_t) (((uint32_t) v->eg2_q16 * (uint32_t) v->eg2_release_coef_q16) >> 16);
             break;
         default: break;
     }
@@ -566,23 +569,28 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         int repitch = 0;
         if (v->has_lfo && v->samples_played >= v->lfo_delay) {
             int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
+            // mod-depth (<=185600) * modulation (<=127) fits int32.
             int32_t depth_q8 = v->lfo_depth_q8 +
-                               (int32_t) (((int64_t) v->lfo_mod_depth_q8 * g_channels[v->channel].modulation) / 127);
+                               (v->lfo_mod_depth_q8 * (int32_t) g_channels[v->channel].modulation) / 127;
             if (depth_q8) {
+                // s (<=32767) * depth_q8 (<=185600 for the deep SFX vibrato)
+                // can exceed 2^31, so this product stays 64-bit.
                 dyn_cents_q8 += (int32_t) (((int64_t) s * depth_q8) >> 15); // Q15 * Q8 -> Q8 cents
                 repitch = 1;
             }
             if (v->trem_depth_q8) {
                 // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
-                int32_t gain_cents_q8 = (int32_t) (((int64_t) s * v->trem_depth_q8) >> 15);
+                // s*depth (<=32767*4352) fits int32.
+                int32_t gain_cents_q8 = (s * v->trem_depth_q8) >> 15;
                 amp_q16 = (int32_t) wt_pitch_step((uint32_t) amp_q16, gain_cents_q8);
+                if (amp_q16 > GM_ONE_Q16 - 1) amp_q16 = GM_ONE_Q16 - 1; // keep gain*s in int32
             }
             v->lfo_phase += v->lfo_phase_inc;
         }
         if (v->has_eg2) {
             wt_advance_eg2(v);
-            // level Q16 * cents -> Q8 cents.
-            dyn_cents_q8 += (int32_t) (((int64_t) v->eg2_q16 * v->eg2_pitch_cents) >> 8);
+            // level Q16 (<=65536) * cents (<=1200) -> Q8 cents, fits int32.
+            dyn_cents_q8 += (v->eg2_q16 * v->eg2_pitch_cents) >> 8;
             repitch = 1;
         }
         if (repitch) v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
@@ -598,8 +606,10 @@ INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
         int32_t s1 = (i1 < v->frame_count) ? v->pcm[i1] : s0;
         int32_t s = s0 + (((s1 - s0) * (int32_t) (v->frac >> 1)) >> 15);
 
-        int32_t gain = (int32_t) (((int64_t) v->env_q16 * amp_q16) >> 16); // Q16
-        int32_t val = (int32_t) (((int64_t) s * gain) >> 16);
+        // env<=65536, amp<=65535 -> product < 2^32 (single unsigned MUL); the
+        // resulting gain<=65535, so s (<=32767) * gain stays inside int32.
+        int32_t gain = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) amp_q16) >> 16); // Q16
+        int32_t val = (s * gain) >> 16;
 
         l += (val * v->pan_l_q15) >> 15;
         r += (val * v->pan_r_q15) >> 15;
