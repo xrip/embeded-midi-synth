@@ -35,6 +35,7 @@ $HostTargets = @{
     'gus_pack'       = 'tools/gus_pack.c'
     'wt_render'      = 'examples/wt_render.c'
     'midi_selfcheck' = 'tools/midi_selfcheck.c'
+    'mulaw_probe'    = 'tools/mulaw_probe.c'
 }
 
 if ($HostTargets.ContainsKey($Target)) {
