@@ -90,6 +90,15 @@ Render a MIDI file through the fixed-point engine on the host:
 ./build/wt_render.exe song.mid build/song.wav build/gm_bank.bin
 ```
 
+The repository also ships a tiny bank-free generator synth in `sine/` (sine
+table + noise LFSR, GM envelopes, drum map). Render it to a 16-bit mono WAV with
+no sound bank at all:
+
+```powershell
+./build.ps1 -Target sine_render
+./build/sine_render.exe song.mid build/song.wav
+```
+
 ## Embedded Integration
 
 At runtime, bind the packed bank once and feed MIDI channel-voice messages:
