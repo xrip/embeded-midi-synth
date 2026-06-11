@@ -2,13 +2,14 @@
 //
 //   gus_pack <timidity.cfg> <out.bin> <output_rate>
 //
-// Produces the same GMWB v4 blob as dls_pack, without changing the runtime
-// synth. This is intentionally a dgguspat-oriented MVP, not a full TiMidity or
-// UltraMID emulator.
+// Produces the same GMWB blob as dls_pack (8-bit µ-law PCM), without changing
+// the runtime synth. This is intentionally a dgguspat-oriented MVP, not a full
+// TiMidity or UltraMID emulator.
 #include <math.h>
 
 #include "gus_parse.c.inl"
 #include "../gm_bank.h"
+#include "../mulaw.h"
 
 typedef struct {
     void *data;
@@ -128,8 +129,8 @@ static uint32_t append_wave(const gus_sample_t *sm, uint32_t output_rate, vec_t 
             uint8_t b = sm->pcm[i];
             v = is_unsigned ? ((long) b - 128L) << 8 : ((int8_t) b) << 8;
         }
-        int16_t *dst = vec_push(pcm);
-        *dst = clamp_i16(v);
+        uint8_t *dst = vec_push(pcm);
+        *dst = gm_linear2ulaw(clamp_i16(v));   // µ-law: one byte per sample
     }
 
     return (uint32_t) (waves->count - 1);
@@ -250,7 +251,7 @@ static void write_bank(const char *out_path, uint32_t output_rate,
     ok &= fwrite(instruments->data, sizeof(gm_instrument_t), instruments->count, f) == instruments->count;
     ok &= fwrite(regions->data, sizeof(gm_region_t), regions->count, f) == regions->count;
     ok &= fwrite(waves->data, sizeof(gm_wave_t), waves->count, f) == waves->count;
-    ok &= fwrite(pcm->data, sizeof(int16_t), pcm->count, f) == pcm->count;
+    ok &= fwrite(pcm->data, sizeof(uint8_t), pcm->count, f) == pcm->count;
     if (fclose(f) != 0) ok = 0;
     if (!ok) {
         fprintf(stderr, "write %s failed\n", out_path);
@@ -281,7 +282,7 @@ int main(int argc, char **argv) {
     vec_init(&waves, sizeof(gm_wave_t));
     vec_init(&regions, sizeof(gm_region_t));
     vec_init(&instruments, sizeof(gm_instrument_t));
-    vec_init(&pcm, sizeof(int16_t));
+    vec_init(&pcm, sizeof(uint8_t));   // µ-law: one byte per sample
 
     gus_pack_stats_t stats = {0};
 
@@ -343,15 +344,15 @@ int main(int argc, char **argv) {
     write_bank(out_path, output_rate, &instruments, &regions, &waves, &pcm);
 
     stats.waves = (uint32_t) waves.count;
-    double pcm_mb = (double) (pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
+    double pcm_mb = (double) (pcm.count * sizeof(uint8_t)) / (1024.0 * 1024.0);
     double total_mb = (double) (sizeof(gm_bank_header_t) +
                                 instruments.count * sizeof(gm_instrument_t) +
                                 regions.count * sizeof(gm_region_t) +
                                 waves.count * sizeof(gm_wave_t) +
-                                pcm.count * sizeof(int16_t)) / (1024.0 * 1024.0);
+                                pcm.count * sizeof(uint8_t)) / (1024.0 * 1024.0);
     fprintf(stderr,
             "GUS: %u instruments, %u melodic regions, %u drum regions, %u waves, "
-            "%u samples (%.2f MB PCM, %.2f MB total) @ %u Hz -> %s\n",
+            "%u µ-law samples (%.2f MB PCM, %.2f MB total) @ %u Hz -> %s\n",
             stats.instruments, stats.melodic_regions, stats.drum_regions, stats.waves,
             (uint32_t) pcm.count, pcm_mb, total_mb, output_rate, out_path);
     fprintf(stderr,
