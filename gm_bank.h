@@ -10,7 +10,10 @@
 //    LDR/LDRH, so struct fields are ordered largest-first, every struct size is
 //    a multiple of 4, and the packer aligns each table + the PCM block to 4.
 //    The blob itself must be placed at a 4-byte-aligned flash address.
-//  * PCM is mono int16; sample N lives at (pcm_base)[wave.pcm_offset + N].
+//  * PCM is mono 8-bit G.711 µ-law (mulaw.h); sample N is the byte
+//    (pcm_base)[wave.pcm_offset + N], decoded via gm_ulaw2linear / a 256-entry
+//    LUT. Halves the PCM block vs int16 at ~38 dB constant SNR; byte reads are
+//    unaligned-safe so the natural-alignment rule above does not apply to PCM.
 #pragma once
 
 #include <stdint.h>
@@ -26,7 +29,7 @@
 #define GM_BANK_MAGIC1 'M'
 #define GM_BANK_MAGIC2 'W'
 #define GM_BANK_MAGIC3 'B'
-#define GM_BANK_VERSION 4u  // v4: region tremolo (LFO->gain) + EG2 pitch envelope
+#define GM_BANK_VERSION 5u  // v5: PCM block is 8-bit µ-law (was int16); v4 added tremolo + EG2
 
 // Fixed-point scales.
 #define GM_Q16 16          // gain, envelope coeffs, sustain: Q16 (65536 = 1.0)
@@ -92,8 +95,8 @@ typedef struct {
     uint32_t off_instruments;   // byte offset to gm_instrument_t[]
     uint32_t off_regions;       // byte offset to gm_region_t[]
     uint32_t off_waves;         // byte offset to gm_wave_t[]
-    uint32_t off_pcm;           // byte offset to int16 PCM block (4-aligned)
-    uint32_t pcm_samples;       // number of int16 samples in the PCM block
+    uint32_t off_pcm;           // byte offset to µ-law PCM block (4-aligned)
+    uint32_t pcm_samples;       // number of µ-law sample bytes in the PCM block
 } gm_bank_header_t;             // 44 bytes
 
 _Static_assert(sizeof(gm_wave_t) == 12, "gm_wave_t layout");
@@ -107,7 +110,7 @@ typedef struct {
     const gm_instrument_t  *instruments;
     const gm_region_t      *regions;
     const gm_wave_t        *waves;
-    const int16_t          *pcm;
+    const uint8_t          *pcm;        // µ-law sample bytes (decode via gm_ulaw2linear)
 } gm_bank_view_t;
 
 static inline int gm_bank_view(const void *blob, gm_bank_view_t *out) {
@@ -122,6 +125,6 @@ static inline int gm_bank_view(const void *blob, gm_bank_view_t *out) {
     out->instruments = (const gm_instrument_t *) (base + h->off_instruments);
     out->regions = (const gm_region_t *) (base + h->off_regions);
     out->waves = (const gm_wave_t *) (base + h->off_waves);
-    out->pcm = (const int16_t *) (base + h->off_pcm);
+    out->pcm = (const uint8_t *) (base + h->off_pcm);
     return 1;
 }
