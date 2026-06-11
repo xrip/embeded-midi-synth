@@ -530,6 +530,12 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     }
 
     wt_voice_t *v = wt_alloc_voice();
+    // Un-publish before reinit: at full polyphony wt_alloc_voice hands back a
+    // SOUNDING voice (its g_active_mask bit still set). Clear that bit before the
+    // memset below blows away its pcm/frame_count, so the render stops visiting
+    // this slot while it is half-initialized (symmetric to the publish-last store
+    // at the end of this fn). For a free slot the bit is already 0 -- a no-op.
+    wt_voice_kill(v);
     memset(v, 0, sizeof(*v));
     v->active = 1;
     // NOTE: g_active_mask (which publishes the voice to the render) is set LAST,
