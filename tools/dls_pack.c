@@ -12,7 +12,7 @@
 #include <math.h>
 
 #include "dls_parse.inl"
-#include "gm_bank.h"
+#include "../gm_bank.h"
 
 // ---- growable output buffers -------------------------------------------------
 

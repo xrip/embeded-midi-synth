@@ -2,8 +2,8 @@
 // tick-sorted event stream. Used by the host render harness
 // (examples/wt_render.c) to drive the packed wavetable engine.
 //
-// Requires dls_parse.inl to be included first (uses file_blob_t, read_entire_file,
-// free_file_blob, fourcc_is, rd_u16be, rd_u32be).
+// Requires tools/dls_parse.inl to be included first (uses file_blob_t,
+// read_entire_file, free_file_blob, fourcc_is, rd_u16be, rd_u32be).
 #pragma once
 
 typedef enum {

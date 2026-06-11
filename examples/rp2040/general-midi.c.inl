@@ -21,7 +21,7 @@
 // playback rate (default 22050) or pitch/tempo will be off. See
 // docs/device-integration.md.
 
-#include "gm_bank.h"
+#include "../../gm_bank.h"
 
 #define WT_MAX_VOICES 32
 #ifndef WT_RAMFUNC
@@ -47,7 +47,7 @@
 #pragma push_macro("INLINE")
 #undef INLINE
 #define INLINE static inline
-#include "wavetable.inl"   // parse_midi, midi_sample_stereo, wt_set_bank, midi_command_t
+#include "../../wavetable.inl"   // parse_midi, midi_sample_stereo, wt_set_bank, midi_command_t
 #pragma pop_macro("INLINE")
 
 // Embed the packed soundbank in flash via inline-asm .incbin. Generate it first

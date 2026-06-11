@@ -28,9 +28,10 @@ plain single-translation-unit C and only needs a pointer to a packed bank blob.
 |------|---------|
 | `wavetable.inl` | Fixed-point MIDI wavetable engine. Include this in one C translation unit. |
 | `gm_bank.h` | Packed bank format and validation helper. |
-| `dls_pack.c` | Host tool: converts a RIFF DLS bank into the packed runtime blob. |
-| `general-midi.c.inl` | Optional glue for an existing emulator/firmware integration. |
+| `wt_luts.h` | Baked lookup tables used by the fixed-point engine. |
+| `tools/dls_pack.c` | Host tool: converts a RIFF DLS bank into the packed runtime blob. |
 | `examples/wt_render.c` | Host renderer for validating the fixed-point engine against a packed bank. |
+| `examples/rp2040/` | Optional glue for an existing RP2040/emulator integration. |
 | `docs/usage.md` | Integration guide and public API notes. |
 | `docs/device-integration.md` | RP2040-oriented integration and profiling notes. |
 | `tools/` | Validation and analysis helpers. |

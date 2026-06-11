@@ -27,7 +27,7 @@ Two layers, use whichever fits:
 | Layer | File | What it gives you |
 |-------|------|-------------------|
 | **Engine** | `wavetable.inl` | The synth itself: `parse_midi`, `midi_sample_stereo`, bank binding. Portable, no platform assumptions. |
-| **Glue (optional)** | `general-midi.c.inl` | A ready-made wrapper: embeds the bank, adapts naming, runs init, and exposes a mono `midi_sample()` + a `midi_cache_release()`. A convenience/example, not required. |
+| **Glue (optional)** | `examples/rp2040/general-midi.c.inl` | A ready-made wrapper: embeds the bank, adapts naming, runs init, and exposes a mono `midi_sample()` + a `midi_cache_release()`. A convenience/example, not required. |
 
 ---
 
@@ -137,7 +137,7 @@ void synth_render(int16_t *buf, int frames) {
 Because the engine's symbols have internal linkage (they follow your `INLINE`),
 **everything lives in this one TU**. If other translation units need to reach the
 synth, expose small non-static wrappers from this file (exactly what
-`general-midi.c.inl` does, e.g. for `midi_cache_release`).
+`examples/rp2040/general-midi.c.inl` does, e.g. for `midi_cache_release`).
 
 ---
 

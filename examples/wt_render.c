@@ -10,8 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../dls_parse.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
-#include "../smf_parse.inl"   // midi_file_t, midi_file_load
+#include "../tools/dls_parse.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
+#include "smf_parse.inl"            // midi_file_t, midi_file_load
 #include "../gm_bank.h"
 
 #define INLINE static inline

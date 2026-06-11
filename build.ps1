@@ -31,7 +31,7 @@ if ($GccDir -and (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $GccD
 }
 
 $HostTargets = @{
-    'dls_pack'       = 'dls_pack.c'
+    'dls_pack'       = 'tools/dls_pack.c'
     'wt_render'      = 'examples/wt_render.c'
     'midi_selfcheck' = 'tools/midi_selfcheck.c'
 }

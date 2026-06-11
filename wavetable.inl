@@ -3,8 +3,8 @@
 // Plays the packed flash soundbank (gm_bank.h) with no floating point on the
 // hot path: interpolated sample playback, per-region pitch/loops, a single
 // EG1-style amplitude envelope (Q16), and stereo panning. Designed to drop into
-// the emulator's general-midi.c.inl in place of the synthesized voices and to
-// be compiled on the host by examples/wt_render.c before flashing firmware.
+// embedded audio code or the example RP2040 glue, and to be compiled on the host
+// by examples/wt_render.c before flashing firmware.
 //
 // The includer must provide before including:
 //   * gm_bank.h
@@ -12,9 +12,9 @@
 //   * SOUND_FREQUENCY   (output sample rate; must equal the bank's output_rate)
 // and must define the global g_bank and call wt_set_bank() once.
 //
-// RP2040 (Cortex-M0+) integration notes — these belong in general-midi.c.inl /
-// the emulator, where they can be measured, and are intentionally NOT compiled
-// here (this header stays portable and host-A/B-validated):
+// RP2040 (Cortex-M0+) integration notes — these belong in examples/rp2040 /
+// the firmware, where they can be measured, and are intentionally NOT compiled
+// here (this header stays portable and host-validated):
 //   * RAM-place hot code: define WT_RAMFUNC(name) -> __not_in_flash_func(name)
 //     before including; already applied to midi_sample_stereo and parse_midi.
 //     Keep the LUTs (wt_luts.h) and g_voices in RAM too. The bank PCM is large
@@ -40,7 +40,7 @@
 #endif
 
 // Place hot functions in RAM on device (XIP flash is slow on a cache miss). The
-// includer (e.g. general-midi.c.inl on RP2040) defines this to
+// includer (e.g. examples/rp2040/general-midi.c.inl on RP2040) defines this to
 // __not_in_flash_func; on the host it is identity.
 #ifndef WT_RAMFUNC
 #define WT_RAMFUNC(name) name

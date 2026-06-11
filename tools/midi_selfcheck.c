@@ -1,4 +1,4 @@
-// Host compile/link check for the device GM glue (general-midi.c.inl).
+// Host compile/link check for the device GM glue (examples/rp2040/general-midi.c.inl).
 // Verifies the wavetable engine wires up and the parse_midi / midi_sample
 // contract that mpu401.c.inl depends on still resolves, with INLINE supplied by
 // the includer (as emulator.h does on device). It is NOT meant to run (needs a
@@ -10,7 +10,7 @@
 #define INLINE inline           // emulator convention: code writes `static INLINE`
 #define SOUND_FREQUENCY 22050
 #define WT_BANK_EXTERN           // skip the .incbin embed; supply a stub bank below
-#include "../general-midi.c.inl"
+#include "../examples/rp2040/general-midi.c.inl"
 
 // Stand-in for the embedded bank so the link resolves without the 3 MB file.
 const uint8_t gm_bank_blob[64] = {0};

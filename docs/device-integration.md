@@ -1,7 +1,8 @@
 # RP2040 device integration & profiling (wavetable engine)
 
-Execute this in the emulator repo (general-midi.c.inl + I2S/DMA + CMake). The
-host side (wavetable.inl, gm_bank.bin, dls_pack) is done and A/B-validated.
+Execute this in the emulator repo by copy/adapting
+`examples/rp2040/general-midi.c.inl` alongside the I2S/DMA and CMake integration.
+The host side (wavetable.inl, gm_bank.bin, dls_pack) is done and A/B-validated.
 
 ## Premise (why this list is short)
 
@@ -16,20 +17,21 @@ flash data** (our PCM is `.incbin`'d in flash). 32 voices streaming PCM evict th
 render code from cache and vice-versa. Moving code to RAM removes that contention
 *and* dedicates the whole cache to PCM.
 
-## Step 1 — Wire the engine in (DONE in general-midi.c.inl)
+## Step 1 — Wire the engine in (DONE in examples/rp2040/general-midi.c.inl)
 
-`general-midi.c.inl` now drives the wavetable engine and keeps the existing
-`mpu401.c.inl` contract: `parse_midi(midi_command_t*)` (from wavetable.inl) and a
-mono `int16_t midi_sample(void)` wrapper over `midi_sample_stereo`. It also
-RAM-places the hot path (Step 2) and binds the bank via a `constructor` +
-lazy-init. It needs nothing from the emulator beyond `INLINE` (and, optionally,
-`__not_in_flash_func`), both of which emulator.h already provides.
+`examples/rp2040/general-midi.c.inl` drives the wavetable engine and keeps the
+existing `mpu401.c.inl` contract: `parse_midi(midi_command_t*)` (from
+wavetable.inl) and a mono `int16_t midi_sample(void)` wrapper over
+`midi_sample_stereo`. It also RAM-places the hot path (Step 2) and binds the bank
+via a `constructor` + lazy-init. It needs nothing from the emulator beyond
+`INLINE` (and, optionally, `__not_in_flash_func`), both of which emulator.h
+already provides.
 
 What **you** do in the firmware build:
 1. Generate the bank for the playback rate:
    `dls_pack gm.dls gm_bank.bin 22050` (host tool, already built).
 2. The bank is embedded by an inline-asm `IMPORT_BIN(...)` `.incbin` already in
-   `general-midi.c.inl` (no separate `.S`, no `enable_language(ASM)`). You only
+   `examples/rp2040/general-midi.c.inl` (no separate `.S`, no `enable_language(ASM)`). You only
    need to make `gm_bank.bin` reachable by the assembler when that TU compiles —
    pass the directory via `-Wa,-I`, and relink when the bank changes:
    ```cmake
@@ -52,7 +54,7 @@ Sanity: it should sound like the host `examples/wt_render.c` output (mono sum).
 
 Notes:
 - `midi_command_t` is supplied by wavetable.inl (command/note/velocity/other),
-  matching the `uint32` `mpu401.c.inl` casts. If the emulator defines its own,
+  matching the `uint32` `examples/rp2040/mpu401.c.inl` casts. If the emulator defines its own,
   set `WT_MIDI_COMMAND_T_DEFINED` and match the layout.
 - Rate: the engine does not resample, so pitch/tempo are correct only when the
   output rate equals the bank's `output_rate`. Repack at your rate when you tune
@@ -62,7 +64,7 @@ Notes:
 
 ## Step 2 — RAM-place the hot path (DONE; the #1 win)
 
-`general-midi.c.inl` defines `WT_RAMFUNC(name) -> __not_in_flash_func(name)` when
+`examples/rp2040/general-midi.c.inl` defines `WT_RAMFUNC(name) -> __not_in_flash_func(name)` when
 the SDK macro exists, so `midi_sample_stereo` and `parse_midi` are RAM-resident.
 Also mark the **I2S refill/callback** `__not_in_flash_func` on your side.
 `g_voices`/`g_channels` are plain statics (already RAM). LUTs are `const` (flash)
@@ -116,7 +118,7 @@ reservation**. **Transparent and bit-exact** — the copy is byte-identical; a
 cache-off build renders the same samples. One-shot (drum) waves are never cached.
 
 One switch, nothing to tune:
-- **on by default** — `general-midi.c.inl` needs no define.
+- **on by default** — `examples/rp2040/general-midi.c.inl` needs no define.
 - `-DWT_NO_WAVE_CACHE` — **compile it out entirely**: no pointer table, no LRU
   code, no `<stdlib.h>`/`malloc`; every read goes straight to flash. For targets
   with no spare RAM — not a single allocation is ever attempted. Verified: zero
@@ -138,7 +140,7 @@ Caveats of the no-budget model:
   looped set); it is small and the in-use check is its only safety-critical part.
 
 **Release valve** — `void midi_cache_release(void)` (exported from
-`general-midi.c.inl`) frees the entire cache back to the heap on demand, e.g. when
+`examples/rp2040/general-midi.c.inl`) frees the entire cache back to the heap on demand, e.g. when
 another subsystem needs RAM. MIDI keeps playing: any voice on a RAM copy is
 repointed to the byte-identical flash PCM (same position, no click) and the cache
 re-fills on demand. No-op under `-DWT_NO_WAVE_CACHE`. Call it from the MIDI/audio
