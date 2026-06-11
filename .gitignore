@@ -7,6 +7,7 @@ gm.dls
 GM.DLS
 *.dls
 *.DLS
+dgguspat/
 
 # Generated soundbank (regenerate via dls_pack gm.dls gm_bank.bin 22050)
 gm_bank.bin

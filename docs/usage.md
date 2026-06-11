@@ -14,13 +14,15 @@ platform. (For one concrete embedded port, see `docs/device-integration.md`.)
   control change, program change, pitch bend, RPN).
 - **Output:** 16-bit stereo PCM, one frame at a time, at a fixed sample rate.
 - **Data:** a single position-independent **sound-bank blob** you produce offline
-  from a `GM.DLS` file. The engine reads samples straight out of this blob.
+  from a `GM.DLS` file or a user-supplied GUS `.pat` set. The engine reads
+  samples straight out of this blob.
 - **Footprint:** integer-only hot path; the voice/channel state is a few KB; the
   bank is a few MB and can live in read-only memory (flash, mmap, ROM).
 
-This project does **not** include `GM.DLS`, `gm.dls`, generated `gm_bank.bin`, or
-any Microsoft sound data. Bring your own legally usable RIFF DLS bank and keep
-generated banks out of public commits unless you have redistribution rights.
+This project does **not** include `GM.DLS`, `gm.dls`, generated `gm_bank.bin`,
+Microsoft sound data, or any GUS `.pat` set. Bring your own legally usable RIFF
+DLS bank or GUS patch set and keep generated banks out of public commits unless
+you have redistribution rights.
 
 Two layers, use whichever fits:
 
@@ -36,8 +38,8 @@ Two layers, use whichever fits:
 ```
    offline (build machine)              runtime (your app)
    ┌────────────────────┐               ┌──────────────────────────────┐
-   │ gm.dls             │   dls_pack    │ bank blob in memory          │
-   │  (DLS sound set)   │ ───────────►  │  (flash / file / ROM)        │
+   │ gm.dls / GUS cfg   │ dls_pack or   │ bank blob in memory          │
+   │  + .pat files      │   gus_pack    │  (flash / file / ROM)        │
    └────────────────────┘  gm_bank.bin  └──────────────┬───────────────┘
                                                         │ wt_set_bank(blob)
    MIDI bytes ──► midi_command_t ──► parse_midi() ──►  engine state
@@ -45,7 +47,8 @@ Two layers, use whichever fits:
    audio callback ◄── int16 L/R ◄── midi_sample_stereo()┘  (call per frame)
 ```
 
-1. **Offline:** pack `gm.dls` into a blob for your target output rate.
+1. **Offline:** pack `gm.dls`, or a GUS patch set via `timidity.cfg`, into a
+   blob for your target output rate.
 2. **Init:** make the blob reachable in memory, then `wt_set_bank(blob)` once.
 3. **MIDI in:** for every channel-voice message, fill a `midi_command_t` and call
    `parse_midi`.
@@ -58,12 +61,19 @@ Two layers, use whichever fits:
 
 The engine never parses `GM.DLS` at runtime; it plays a compact pre-baked blob.
 
-Produce it with the offline packer (host tool):
+Produce it with an offline packer (host tool):
 
 ```
 dls_pack <gm.dls> <out.bin> <output_rate>
 # e.g. dls_pack gm.dls gm_bank.bin 22050
+
+gus_pack <timidity.cfg> <out.bin> <output_rate>
+# e.g. gus_pack dgguspat/timidity.cfg gm_bank.bin 22050
 ```
+
+`gus_pack` supports the simple `bank`, `drumset`, and `<number> <patchname>`
+TiMidity mapping used by `dgguspat/timidity.cfg`. Put the patch directory on
+your machine yourself; the project does not redistribute it.
 
 - The blob is **position-independent** (every reference is a byte offset), so you
   can place it at any address: embed it in the binary, `mmap` a file, point at a
@@ -285,7 +295,7 @@ yield.
 
 ## 11. Quick checklist
 
-1. `dls_pack gm.dls gm_bank.bin <rate>` — pack the bank for your output rate.
+1. `dls_pack gm.dls gm_bank.bin <rate>` or `gus_pack dgguspat/timidity.cfg gm_bank.bin <rate>` — pack the bank for your output rate.
 2. Get the blob into memory; optionally validate with `gm_bank_view`.
 3. In one source file: define `INLINE`, `SOUND_FREQUENCY`, include `gm_bank.h`
    then `wavetable.c.inl`.

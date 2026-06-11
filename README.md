@@ -3,12 +3,14 @@
 Fixed-point General MIDI wavetable synthesis for embedded targets.
 
 This repository contains a small C wavetable engine that plays a pre-packed RIFF
-DLS General MIDI bank. The runtime audio path is integer/fixed-point only: no
+DLS General MIDI bank, or a user-supplied Gravis UltraSound `.pat` set packed
+from a TiMidity config. The runtime audio path is integer/fixed-point only: no
 floating point, no DLS parsing, and no dynamic instrument metadata work during
 rendering. The intended flow is:
 
 ```text
 GM-compatible .dls bank -> dls_pack -> compact bank blob -> embedded synth
+GUS .pat set + timidity.cfg -> gus_pack -> same compact bank blob -> embedded synth
 ```
 
 The current integration target is RP2040-class hardware, but the engine itself is
@@ -30,6 +32,7 @@ plain single-translation-unit C and only needs a pointer to a packed bank blob.
 | `gm_bank.h` | Packed bank format and validation helper. |
 | `wt_luts.h` | Baked lookup tables used by the fixed-point engine. |
 | `tools/dls_pack.c` | Host tool: converts a RIFF DLS bank into the packed runtime blob. |
+| `tools/gus_pack.c` | Host tool: converts a simple TiMidity/GUS patch set into the same packed runtime blob. |
 | `examples/wt_render.c` | Host renderer for validating the fixed-point engine against a packed bank. |
 | `examples/rp2040/` | Optional glue for an existing RP2040/emulator integration. |
 | `docs/usage.md` | Integration guide and public API notes. |
@@ -38,9 +41,9 @@ plain single-translation-unit C and only needs a pointer to a packed bank blob.
 
 ## Sound Bank Licensing
 
-This project does not include `GM.DLS`, `gm.dls`, `gm_bank.bin`, or any Microsoft
-sound data. Users must provide their own legally usable RIFF DLS General MIDI
-bank and build the packed blob locally.
+This project does not include `GM.DLS`, `gm.dls`, `gm_bank.bin`, Microsoft sound
+data, or any GUS `.pat` set. Users must provide their own legally usable RIFF DLS
+General MIDI bank or GUS patch set and build the packed blob locally.
 
 Buying or owning Windows should not be treated as permission to redistribute
 Microsoft's `gm.dls` or to use it outside the rights granted by the applicable
@@ -49,8 +52,9 @@ not sold, apply to included sound files, and reserve rights not expressly grante
 See the current Microsoft license terms page:
 https://www.microsoft.com/en-us/useterms
 
-Practical rule for this repo: do not commit or publish `GM.DLS`, `gm.dls`, or a
-packed `gm_bank.bin` derived from a bank you cannot redistribute.
+Practical rule for this repo: do not commit or publish `GM.DLS`, `gm.dls`, a
+third-party patch directory such as `dgguspat/`, or a packed `gm_bank.bin`
+derived from a bank you cannot redistribute.
 
 ## Build Host Tools
 
@@ -59,6 +63,7 @@ The PowerShell build script expects a C compiler. Put `gcc` in `PATH`, or set
 
 ```powershell
 ./build.ps1 -Target dls_pack
+./build.ps1 -Target gus_pack
 ./build.ps1 -Target wt_render
 ./build.ps1 -Target midi_selfcheck
 ```
@@ -67,6 +72,12 @@ Pack a bank for your target sample rate:
 
 ```powershell
 ./build/dls_pack.exe path/to/gm.dls build/gm_bank.bin 22050
+```
+
+Alternatively, pack a user-provided GUS patch set using a simple TiMidity config:
+
+```powershell
+./build/gus_pack.exe dgguspat/timidity.cfg build/gm_gus.bin 22050
 ```
 
 Render a MIDI file through the fixed-point engine on the host:
