@@ -68,6 +68,10 @@ static int wav_close(wav_t *w) {
 
 static void render_block(wav_t *wav, uint64_t samples) {
     extern int g_probe_max; extern long g_probe_sum, g_probe_n;
+#if defined(WT_TEST_RELEASE) && defined(WT_WAVE_CACHE)
+    wt_cache_release();   // stress: drop the cache mid-playback every block; output
+                          // must stay bit-exact (proves the voice->flash repoint).
+#endif
     for (uint64_t i = 0; i < samples; ++i) {
         int16_t l, r;
         midi_sample_stereo(&l, &r);
@@ -140,6 +144,22 @@ int main(int argc, char **argv) {
     int ok = wav_close(&wav);
     fprintf(stderr, "WT: %u Hz stereo, %u frames, WT_BLOCK=%d -> %s\n", sample_rate, wav.frames, WT_BLOCK, wav_path);
     fprintf(stderr, "VOICES peak=%d avg=%.1f\n", g_probe_max, g_probe_n ? (double) g_probe_sum / g_probe_n : 0.0);
+#ifdef WT_WAVE_CACHE
+    {
+        uint32_t kb = 0; int n = 0;
+        for (int i = 0; i < WT_WAVE_CACHE_SLOTS; ++i)
+            if (g_wave_ram[i]) { ++n; kb += g_bank.waves[i].frame_count * 2u / 1024; }
+        fprintf(stderr, "WAVECACHE resident=%uKB in %d waves (end-of-render)\n", kb, n);
+    }
+#ifdef WT_WAVE_CACHE_PROFILE
+    {
+        uint64_t reads = g_pcm_ram_reads + g_pcm_flash_reads;
+        fprintf(stderr, "  PER-SAMPLE pcm reads from RAM: %.1f%% (RAM=%llu flash=%llu)\n",
+                reads ? 100.0 * (double) g_pcm_ram_reads / (double) reads : 0.0,
+                (unsigned long long) g_pcm_ram_reads, (unsigned long long) g_pcm_flash_reads);
+    }
+#endif
+#endif
     midi_file_free(&midi);
     free_file_blob(&bank_blob);
     return ok ? 0 : 1;

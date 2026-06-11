@@ -30,6 +30,15 @@
 #endif
 #endif
 
+// RAM wave cache (on by default): the first time a looped wave plays it is
+// malloc'd into RAM and read from RAM thereafter, so the per-sample pcm[] reads
+// stop hitting XIP flash (the real bottleneck at high polyphony). It caches as
+// much as fits in the heap right now and frees its least-recently-used wave when
+// the heap is full — RAM use scales with the live working set, no fixed
+// reservation. Host A/B on Doom/omf/dott: ~90%+ of per-sample reads from RAM,
+// bit-exact. Build with -DWT_NO_WAVE_CACHE to compile it out entirely (no malloc)
+// on targets with no spare RAM. See wavetable.inl / docs/device-integration.md.
+
 // wavetable.inl marks its functions `INLINE foo` expecting INLINE == `static
 // inline`. The emulator's INLINE is just `inline` (its code writes `static
 // INLINE`), which would give wavetable external-linkage inlines. Bridge it for
@@ -82,4 +91,14 @@ static INLINE int16_t midi_sample(void) {
     int16_t l, r;
     midi_sample_stereo(&l, &r);
     return (int16_t) (((int32_t) l + (int32_t) r) >> 1);
+}
+
+// Hand all the wave cache's RAM back to the heap when another subsystem needs it.
+// MIDI keeps playing (voices on a RAM copy fall back to the byte-identical flash
+// PCM seamlessly; the cache re-fills on demand). No-op when the cache is compiled
+// out (WT_NO_WAVE_CACHE). Exported (external linkage): a consumer in another TU
+// declares `extern void midi_cache_release(void);`. Call it from the same context
+// as the MIDI/audio path, not concurrently with midi_sample().
+void midi_cache_release(void) {
+    wt_cache_release();
 }

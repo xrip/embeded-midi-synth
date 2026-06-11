@@ -62,6 +62,23 @@
 #define WT_MIDI_CHANNELS 16
 #define WT_PITCH_BEND_RANGE_SEMITONES 2
 
+// ---- RAM wave cache: configuration ------------------------------------------
+// The two per-sample pcm[] reads hit XIP flash, the real cost at high polyphony.
+// The first time a LOOPED wave plays we malloc a RAM copy and read it from RAM
+// ever after (host A/B: bit-exact; ~90%+ of per-sample reads come from RAM).
+// It is opportunistic and has NO size budget: it caches as many waves as fit in
+// the heap right now; when malloc fails it frees its least-recently-used wave
+// that no sounding voice is reading and retries, and only if nothing is evictable
+// does that read stay on flash. So RAM use scales with the live working set and
+// whatever the heap has free at the moment, with no fixed reservation.
+//
+// ONE switch: -DWT_NO_WAVE_CACHE compiles the cache out entirely — no slot table,
+// no LRU code, no <stdlib.h>/malloc, every read straight to flash — for targets
+// with no spare RAM, so not a single allocation is ever attempted.
+#ifndef WT_NO_WAVE_CACHE
+#define WT_WAVE_CACHE 1
+#endif
+
 #ifndef WT_MIDI_COMMAND_T_DEFINED
 #define WT_MIDI_COMMAND_T_DEFINED
 typedef struct __attribute__((packed)) {
@@ -128,6 +145,7 @@ typedef struct {
     int16_t  pan_l_q15;
     int16_t  pan_r_q15;
     uint32_t age;
+    uint16_t wave_index;      // wave this voice plays (lets the cache see what's in use)
 } wt_voice_t;
 
 typedef struct {
@@ -166,6 +184,86 @@ static const uint8_t g_ctz32[32] = {
 static inline int wt_ctz32(uint32_t x) {  // x must be non-zero
     return g_ctz32[((x & (0u - x)) * 0x077CB531u) >> 27];
 }
+
+// ---- RAM wave cache (note-on only; see the configuration block above) --------
+// One pointer per wave_index: non-NULL = a malloc'd RAM copy, NULL = read flash.
+// On a miss we malloc and copy; if the heap is full we free the least-recently-
+// used wave that no sounding voice is reading and retry (so a fresh song replaces
+// a stale instrument set), else the read stays on flash. No budget, no refcount —
+// "in use" is read live from the active-voice mask. Bit-exact (copy is identical).
+#ifdef WT_WAVE_CACHE
+#include <stdlib.h>                // malloc / free
+#ifndef WT_WAVE_CACHE_SLOTS
+#define WT_WAVE_CACHE_SLOTS 512    // wave-pointer table size; >= the bank's wave_count
+#endif
+static int16_t *g_wave_ram[WT_WAVE_CACHE_SLOTS];   // RAM copy per wave_index (NULL = flash)
+static uint32_t g_wave_age[WT_WAVE_CACHE_SLOTS];   // g_next_age at last use (LRU key)
+#ifdef WT_WAVE_CACHE_PROFILE
+static uint64_t g_pcm_ram_reads, g_pcm_flash_reads;          // host-only per-sample tally
+#endif
+
+static void wt_cache_reset(void) {
+    for (int i = 0; i < WT_WAVE_CACHE_SLOTS; ++i) { free(g_wave_ram[i]); g_wave_ram[i] = NULL; }
+#ifdef WT_WAVE_CACHE_PROFILE
+    g_pcm_ram_reads = g_pcm_flash_reads = 0;
+#endif
+}
+
+// Is any sounding voice still reading this wave? (then it must not be evicted)
+static int wt_wave_in_use(uint16_t wave) {
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1)
+        if (g_voices[wt_ctz32(mm)].wave_index == wave) return 1;
+    return 0;
+}
+
+// Free the least-recently-used resident wave no voice is reading; 1 if one went.
+static int wt_cache_evict(void) {
+    int best = -1; uint32_t best_age = 0xFFFFFFFFu;
+    for (int i = 0; i < WT_WAVE_CACHE_SLOTS; ++i)
+        if (g_wave_ram[i] && g_wave_age[i] <= best_age && !wt_wave_in_use((uint16_t) i))
+            best_age = g_wave_age[i], best = i;
+    if (best < 0) return 0;
+    free(g_wave_ram[best]); g_wave_ram[best] = NULL;
+    return 1;
+}
+
+static const int16_t *wt_wave_base(wt_voice_t *v, const gm_wave_t *w, int looped) {
+    const int16_t *flash = g_bank.pcm + w->pcm_offset;
+    uint16_t wi = v->wave_index;
+    if (!looped || wi >= WT_WAVE_CACHE_SLOTS) return flash;     // one-shot / out of table
+    if (g_wave_ram[wi]) { g_wave_age[wi] = g_next_age; return g_wave_ram[wi]; }  // resident
+    uint32_t bytes = w->frame_count * 2u;
+    int16_t *ram = (int16_t *) malloc(bytes);
+    while (!ram) {                                              // heap full -> shed our own waves
+        if (!wt_cache_evict()) return flash;
+        ram = (int16_t *) malloc(bytes);
+    }
+    memcpy(ram, flash, bytes);
+    g_wave_ram[wi] = ram;
+    g_wave_age[wi] = g_next_age;
+    return ram;
+}
+
+// Public: drop the whole cache and hand all its RAM back to the heap. A consumer
+// that needs memory can call this any time; MIDI keeps playing — a voice reading a
+// RAM copy is repointed to the byte-identical flash PCM (same sample at the same
+// position, so no click), and the cache simply re-fills on demand. Call from the
+// same context as parse_midi (not concurrently with the render).
+static void wt_cache_release(void) {
+    for (uint32_t mm = g_active_mask; mm; mm &= mm - 1) {
+        wt_voice_t *v = &g_voices[wt_ctz32(mm)];
+        uint16_t wi = v->wave_index;
+        if (wi < WT_WAVE_CACHE_SLOTS && g_wave_ram[wi] == v->pcm)
+            v->pcm = g_bank.pcm + g_bank.waves[wi].pcm_offset;
+    }
+    for (int i = 0; i < WT_WAVE_CACHE_SLOTS; ++i) { free(g_wave_ram[i]); g_wave_ram[i] = NULL; }
+}
+#else
+#define wt_wave_base(v, w, looped) (g_bank.pcm + (w)->pcm_offset)
+#define wt_cache_reset()   ((void) 0)
+#define wt_cache_release() ((void) 0)
+#endif
+
 static inline void wt_voice_kill(wt_voice_t *v) {
     v->active = 0;
     g_active_mask &= ~(1u << (uint32_t) (v - g_voices));
@@ -213,6 +311,7 @@ static void wt_engine_reset(void) {
     memset(g_voices, 0, sizeof(g_voices));
     g_active_mask = 0;
     g_next_age = 0;
+    wt_cache_reset();   // clear the RAM wave cache (no-op when compiled out)
     for (int i = 0; i < WT_MIDI_CHANNELS; ++i) {
         g_channels[i].program = 0;
         g_channels[i].volume = 100;
@@ -409,7 +508,8 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     v->key_group = rg->key_group;
     v->age = g_next_age++;
 
-    v->pcm = g_bank.pcm + w->pcm_offset;
+    v->wave_index = rg->wave_index;
+    v->pcm = wt_wave_base(v, w, (rg->flags & GM_RGN_LOOPED) != 0);
     v->frame_count = w->frame_count;
     if (rg->flags & GM_RGN_LOOPED) {  // honor DLS loop (EG1 decay governs ring time)
         v->looped = 1;
@@ -709,6 +809,11 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
         // bit-exact; interpolator state is per-core, so the render must own its
         // core or save/restore. The two pcm[] reads below hit XIP flash and are
         // the real per-voice cost at high polyphony (see integration notes).
+#if defined(WT_WAVE_CACHE_PROFILE) && defined(WT_WAVE_CACHE)
+        if (v->pcm >= g_bank.pcm && v->pcm < g_bank.pcm + g_bank.header->pcm_samples)
+            g_pcm_flash_reads++;   // still pointing into the flash PCM block
+        else g_pcm_ram_reads++;    // a malloc'd RAM copy
+#endif
         uint32_t i0 = v->frame_pos;
         int32_t s0 = v->pcm[i0];
         uint32_t i1 = i0 + 1;

@@ -20,5 +20,6 @@ int main(void) {
     parse_midi(&c);
     volatile int16_t s = midi_sample();
     (void) s;
+    midi_cache_release();                     // public cache-drop entry point
     return 0;
 }

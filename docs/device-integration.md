@@ -101,16 +101,92 @@ Decision gates:
   done.** Don't build Step 4.
 - hit-rate low / cyc near budget at 32 voices → Step 4.
 
-## Step 4 — PCM cache pressure (CONDITIONAL on Step 3)
+## Step 4 — RAM wave cache (IMPLEMENTED, on by default)
 
-Only if measured. Options, cheapest first:
-- **Loop-region RAM cache**: when a *looped* voice starts, copy its loop window
-  (loop_start..loop_end, often small) into a RAM pool; point `v->pcm` at it.
-  Fixes the sustained-instrument thrash without holding the whole bank.
-- **Hot-instrument relocation**: copy the few most-used programs (piano, drum
-  kit) to RAM at boot/first-use. ~150–200 KB SRAM free; bank is 3 MB so this is
-  partial by design.
-- Re-measure hit-rate after.
+`wavetable.inl` keeps one pointer per `wave_index`: the first time a **looped**
+wave plays it `malloc`s a RAM copy, stores the pointer and reads from RAM ever
+after, so the two per-sample `pcm[]` reads hit RAM instead of XIP flash. It is
+**opportunistic with no budget** — it caches as many waves as fit in the heap
+*right now*; when a `malloc` fails it `free`s the **least-recently-used wave that
+no sounding voice is still reading** ("in use" is read live from the active-voice
+mask — no refcount, no teardown hooks) and retries, and only if nothing is
+evictable does that read stay on flash. So a fresh song transparently replaces a
+stale instrument set, and RAM use scales with the live working set with **no fixed
+reservation**. **Transparent and bit-exact** — the copy is byte-identical; a
+cache-off build renders the same samples. One-shot (drum) waves are never cached.
+
+One switch, nothing to tune:
+- **on by default** — `general-midi.c.inl` needs no define.
+- `-DWT_NO_WAVE_CACHE` — **compile it out entirely**: no pointer table, no LRU
+  code, no `<stdlib.h>`/`malloc`; every read goes straight to flash. For targets
+  with no spare RAM — not a single allocation is ever attempted. Verified: zero
+  cache symbols in the binary, output bit-identical to cache-off.
+- (`-DWT_WAVE_CACHE_SLOTS=N`, default 512, only sizes the pointer table; raise it
+  only for a bank with more than 512 waves. Not a memory tuning knob.)
+
+Caveats of the no-budget model:
+- **Greedy heap.** The cache will use all currently-free heap, freeing waves only
+  when its own next `malloc` fails. Allocate every *other* subsystem's buffers
+  (USB, DMA, etc.) up front, before the synth runs, so the cache only consumes
+  what is genuinely spare. A later large allocation by another subsystem can fail
+  if the cache holds the RAM (the cache does not pre-emptively yield) — for that,
+  call the release valve below to reclaim it.
+- **Fragmentation** of the shared heap is possible on a long-running device; the
+  failure mode is graceful (a wave stays on flash), never a crash.
+- The **eviction path only triggers under real memory pressure**, so it is not
+  exercised by the host A/B (host `malloc` never fails — it just caches the whole
+  looped set); it is small and the in-use check is its only safety-critical part.
+
+**Release valve** — `void midi_cache_release(void)` (exported from
+`general-midi.c.inl`) frees the entire cache back to the heap on demand, e.g. when
+another subsystem needs RAM. MIDI keeps playing: any voice on a RAM copy is
+repointed to the byte-identical flash PCM (same position, no click) and the cache
+re-fills on demand. No-op under `-DWT_NO_WAVE_CACHE`. Call it from the MIDI/audio
+context (not concurrently with the render). Proven seamless on host:
+`wt_render -DWT_TEST_RELEASE` drops the cache every render block during playback
+and stays bit-exact vs cache-off.
+
+Measured (host A/B census, `tools/bank_census.py` + `wt_render` with
+`-DWT_WAVE_CACHE_PROFILE`): bank 495 waves, 89 % looped, median 4 KB / max 36 KB.
+With the cache on, **per-sample reads served from RAM: 90–94 %** (Doom-E1M1 /
+d_dm2int / dott / omf); the residual ~6–10 % are one-shot drums. On the device the
+resident set is bounded by free heap (LRU churns the rest); host has room for the
+whole ~485 KB looped set so it caches all of it.
+
+Validate any change on host (must stay bit-exact + report RAM share):
+```
+powershell -Command "& ./build.ps1 -Target wt_render \
+  -Define WT_NO_WAVE_CACHE -OutName wt_render_off"            # reference (cache off)
+powershell -Command "& ./build.ps1 -Target wt_render \
+  -Define WT_WAVE_CACHE_PROFILE -OutName wt_render_cache"     # cache on (default) + profile
+# render both, cmp -s the WAVs (bit-exact), read the WAVECACHE line on stderr
+```
+
+### Real-time budget: copy keeps up with the MIDI wire
+
+A miss does a `malloc` + synchronous `memcpy` flash→RAM in note-on handling (the
+`malloc` is a cheap cold-path cost dwarfed by the copy); this must not fall behind
+the input. MIDI is 31250 baud / 8N1 = 3125 B/s = **320 µs per byte**;
+the fastest note-on (running-status, 2 B) is **640 µs** apart, a program change +
+note (5 B) 1600 µs. RP2040 quad XIP reads ~33–45 MB/s; take a conservative
+**24 MB/s**. Then **during one 2-byte note-on's own 640 µs we can copy 15 KB** —
+which is the 90th-percentile wave. So ≥90 % of waves finish copying within the
+note-on that requested them; no backlog accumulates even at full wire speed. Copy
+times: median 4 KB → 167 µs, p90 15 KB → 629 µs, **max 36 KB → 1.5 ms** (worst
+single-copy latency, absorbed by any DMA audio buffer ≥ 1.5 ms; a 64-frame buffer
+@22050 is 2.9 ms). Aggregate: filling the whole 2.7 MB looped set = 115 ms of
+copying, but requesting all 439 distinct waves takes ≥ 281 ms of wire → ~41 % copy
+duty, then everything is resident. The only stream that can outpace copy is a
+deliberate loop over the ~44 largest (>15 KB) waves forcing eviction every hit
+(~31 MB/s demand) — not musical, and it degrades gracefully (UART RX buffer + the
+flash fallback in `wt_wave_base`, no glitch). Hardening lever if ever needed:
+issue the copy on a DMA channel (RP2040 does flash→RAM DMA) and let the voice read
+from flash until the DMA completes, then swap `v->pcm` — removes copy latency from
+the audio path entirely.
+
+Still device-conditional, if Step 3 shows pressure even with the cache:
+- **Whole-bank in PSRAM**: copy the 3 MB bank to PSRAM at boot and `wt_set_bank()`
+  that copy — bypasses the cache, makes XIP irrelevant.
 
 ## Explicitly NOT doing (measured low/no value)
 
