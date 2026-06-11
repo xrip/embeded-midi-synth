@@ -2,9 +2,9 @@
 //
 //   dls_pack <gm.dls> <out.bin> <output_rate>
 //
-// Reuses the shared DLS parser (dls_parse.inl) to load the bank exactly like
-// the golden-reference player, then bakes everything the real-time fixed-point
-// engine needs into a position-independent blob (see gm_bank.h):
+// Reuses the shared DLS parser (dls_parse.inl), then bakes everything the
+// real-time fixed-point engine needs into a position-independent blob
+// (see gm_bank.h):
 //   * waves downmixed to mono int16 at native rate, with base playback step
 //   * regions with resolved wsmp tuning/attenuation/loop and EG1 coefficients
 //     baked at <output_rate> so the device never does float math
@@ -79,9 +79,9 @@ static double clampd(double v, double lo, double hi) {
 }
 
 // Validation stat for the wsmp gain field. We interpret it as SIGNED GAIN
-// (positive = boost), like DLS2 lGain; the legacy reference player chose this
-// too, but other DLS implementations read it as attenuation (positive =
-// quieter). If GM.DLS values turn out mostly positive, our sign is suspect.
+// (positive = boost), like DLS2 lGain; other DLS implementations read it as
+// attenuation (positive = quieter). If GM.DLS values turn out mostly positive,
+// our sign is suspect.
 static void att_stat(int32_t att, int32_t *mn, int32_t *mx, uint32_t *pos, uint32_t *neg) {
     if (att < *mn) *mn = att;
     if (att > *mx) *mx = att;

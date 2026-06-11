@@ -1,6 +1,6 @@
 // Shared Standard MIDI File (SMF) loader: parses format 0/1 files into a single
-// tick-sorted event stream. Used by the golden-reference player and the host
-// A/B render harness (examples/wt_render.c) so both sequence identically.
+// tick-sorted event stream. Used by the host render harness
+// (examples/wt_render.c) to drive the packed wavetable engine.
 //
 // Requires dls_parse.inl to be included first (uses file_blob_t, read_entire_file,
 // free_file_blob, fourcc_is, rd_u16be, rd_u32be).

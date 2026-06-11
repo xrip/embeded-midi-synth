@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# A/B WAV comparator for the wavetable engine vs golden reference.
+# A/B WAV comparator for two rendered outputs.
 #   python tools/wav_corr.py a.wav b.wav
 # Prints per-channel Pearson correlation and RMS-error-in-dBFS over the
 # overlapping region. Mono refs are compared against L of a stereo file.

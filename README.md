@@ -31,7 +31,6 @@ plain single-translation-unit C and only needs a pointer to a packed bank blob.
 | `dls_pack.c` | Host tool: converts a RIFF DLS bank into the packed runtime blob. |
 | `general-midi.c.inl` | Optional glue for an existing emulator/firmware integration. |
 | `examples/wt_render.c` | Host renderer for validating the fixed-point engine against a packed bank. |
-| `examples/gm_dls_player.c` | Floating-point host reference player for a user-supplied DLS bank. |
 | `docs/usage.md` | Integration guide and public API notes. |
 | `docs/device-integration.md` | RP2040-oriented integration and profiling notes. |
 | `tools/` | Validation and analysis helpers. |
@@ -60,7 +59,6 @@ The PowerShell build script expects a C compiler. Put `gcc` in `PATH`, or set
 ```powershell
 ./build.ps1 -Target dls_pack
 ./build.ps1 -Target wt_render
-./build.ps1 -Target gm_dls_player
 ./build.ps1 -Target midi_selfcheck
 ```
 

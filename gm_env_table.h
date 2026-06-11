@@ -1,6 +1,6 @@
 // Shared GM per-program amplitude-envelope table (single source of truth).
-// Used by the offline packer (to bake EG1-equivalent coefficients for DLS
-// regions that carry no EG1 articulation) and by the golden-reference player.
+// Used by the offline packer to bake EG1-equivalent coefficients for DLS
+// regions that carry no EG1 articulation.
 // The real-time engine's general-midi.h keeps the same values; define
 // GM_ENV_ATTR before including to attach a placement attribute on device.
 #pragma once

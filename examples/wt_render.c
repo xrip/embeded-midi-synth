@@ -3,8 +3,7 @@
 //   wt_render <input.mid> <output.wav> <gm_bank.bin> [sample-rate]
 //
 // Loads the packed soundbank, drives the SAME engine that targets the RP2040
-// (wavetable.inl) over a Standard MIDI File using the same tick->sample timing
-// as the golden reference (examples/gm_dls_player.c), and writes 16-bit stereo WAV. Used
+// (wavetable.inl) over a Standard MIDI File, and writes 16-bit stereo WAV. Used
 // to validate the fixed-point engine on the desktop before flashing.
 #include <math.h>
 #include <stdint.h>
@@ -66,7 +65,7 @@ static int wav_close(wav_t *w) {
     return ok;
 }
 
-// ---- sequencer (same timing math as gm_dls_player render_midi_to_wav) --------
+// ---- sequencer ---------------------------------------------------------------
 
 static void render_block(wav_t *wav, uint64_t samples) {
     extern int g_probe_max; extern long g_probe_sum, g_probe_n;
