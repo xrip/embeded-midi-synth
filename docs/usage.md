@@ -75,6 +75,28 @@ gus_pack <timidity.cfg> <out.bin> <output_rate>
 TiMidity mapping used by `dgguspat/timidity.cfg`. Put the patch directory on
 your machine yourself; the project does not redistribute it.
 
+## GUS Patch Sets
+
+`gus_pack` is the offline packer for classic Gravis UltraSound `.pat` banks.
+The intended input is a local patch directory plus a TiMidity config file, such
+as `dgguspat/timidity.cfg`.
+
+Supported in this first version:
+
+- `bank N`
+- `drumset N`
+- mapping lines like `0 acpiano` or `35 kick1`
+- patch files in the same directory as the config, using `.pat` names
+
+What it does not try to cover:
+
+- full TiMidity feature parity
+- UltraMID emulation
+- advanced mapping directives beyond the simple dgguspat-style layout
+
+The goal is to turn a usable patch collection into the same `gm_bank.bin`
+format that the runtime engine already reads.
+
 - The blob is **position-independent** (every reference is a byte offset), so you
   can place it at any address: embed it in the binary, `mmap` a file, point at a
   ROM region, etc.

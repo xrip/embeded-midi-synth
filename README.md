@@ -80,6 +80,9 @@ Alternatively, pack a user-provided GUS patch set using a simple TiMidity config
 ./build/gus_pack.exe dgguspat/timidity.cfg build/gm_gus.bin 22050
 ```
 
+See [docs/usage.md](docs/usage.md) for the full GUS patch-set notes and supported
+`gus_pack` input format.
+
 Render a MIDI file through the fixed-point engine on the host:
 
 ```powershell
