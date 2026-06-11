@@ -1,6 +1,12 @@
 build/
+cmake-build-*/
+.claude/
+*.wav
+*.exe
 gm.dls
 GM.DLS
+*.dls
+*.DLS
 
 # Generated soundbank (regenerate via dls_pack gm.dls gm_bank.bin 22050)
 gm_bank.bin

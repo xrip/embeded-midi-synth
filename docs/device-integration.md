@@ -48,7 +48,7 @@ What **you** do in the firmware build:
 To supply the bank some other way (separate `.c`/`.S`, or the host self-check),
 define `WT_BANK_EXTERN` before the include and provide `gm_bank_blob` yourself.
 
-Sanity: it should sound like the host `wt_render` output (mono sum).
+Sanity: it should sound like the host `examples/wt_render.c` output (mono sum).
 
 Notes:
 - `midi_command_t` is supplied by wavetable.inl (command/note/velocity/other),

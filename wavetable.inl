@@ -4,8 +4,8 @@
 // hot path: interpolated sample playback, per-region pitch/loops, a single
 // EG1-style amplitude envelope (Q16), and stereo panning. Designed to drop into
 // the emulator's general-midi.c.inl in place of the synthesized voices and to
-// be compiled on the host by wt_render.c for A/B validation against the
-// double-precision golden reference (gm_dls_player.c).
+// be compiled on the host by examples/wt_render.c for A/B validation against the
+// double-precision golden reference (examples/gm_dls_player.c).
 //
 // The includer must provide before including:
 //   * gm_bank.h

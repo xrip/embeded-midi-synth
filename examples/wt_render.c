@@ -4,23 +4,23 @@
 //
 // Loads the packed soundbank, drives the SAME engine that targets the RP2040
 // (wavetable.inl) over a Standard MIDI File using the same tick->sample timing
-// as the golden reference (gm_dls_player.c), and writes 16-bit stereo WAV. Used
+// as the golden reference (examples/gm_dls_player.c), and writes 16-bit stereo WAV. Used
 // to validate the fixed-point engine on the desktop before flashing.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "dls_parse.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
-#include "smf_parse.inl"   // midi_file_t, midi_file_load
-#include "gm_bank.h"
+#include "../dls_parse.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
+#include "../smf_parse.inl"   // midi_file_t, midi_file_load
+#include "../gm_bank.h"
 
 #define INLINE static inline
 #ifndef SOUND_FREQUENCY
 #define SOUND_FREQUENCY 22050   // GM.DLS samples are natively 22050 Hz
 #endif
 #define WT_MAX_VOICES 32   // match the RP2040 target so A/B stealing is identical
-#include "wavetable.inl"
+#include "../wavetable.inl"
 
 // ---- minimal WAV writer ------------------------------------------------------
 
@@ -58,8 +58,10 @@ static void wav_write(wav_t *w, int16_t l, int16_t r) {
 static int wav_close(wav_t *w) {
     uint32_t data = w->frames * 4u;
     int ok = 1;
-    if (fseek(w->file, 4, SEEK_SET) != 0) ok = 0; wr_u32(w->file, 36u + data);
-    if (fseek(w->file, 40, SEEK_SET) != 0) ok = 0; wr_u32(w->file, data);
+    if (fseek(w->file, 4, SEEK_SET) != 0) ok = 0;
+    wr_u32(w->file, 36u + data);
+    if (fseek(w->file, 40, SEEK_SET) != 0) ok = 0;
+    wr_u32(w->file, data);
     if (fclose(w->file) != 0) ok = 0;
     return ok;
 }

@@ -15,11 +15,11 @@
 #define DEFAULT_SAMPLE_RATE 44100u
 #define DEFAULT_PITCH_BEND_RANGE_SEMITONES 2.0
 
-#include "dls_parse.inl"
+#include "../dls_parse.inl"
 
-#include "gm_env_table.h"
+#include "../gm_env_table.h"
 
-#include "smf_parse.inl"
+#include "../smf_parse.inl"
 
 typedef struct {
     uint8_t program;
@@ -887,8 +887,6 @@ static const char *find_default_dls(void) {
     static const char *candidates[] = {
         "gm.dls",
         "GM.DLS",
-        "C:\\Windows\\System32\\drivers\\gm.dls",
-        "C:\\Windows\\SysWOW64\\drivers\\gm.dls",
     };
 
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
@@ -904,7 +902,7 @@ static const char *find_default_dls(void) {
 static void usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s input.mid output.wav [gm.dls] [sample-rate]\n"
-            "renders a Standard MIDI File through a RIFF DLS GM bank to 16-bit stereo WAV\n",
+            "renders a Standard MIDI File through a user-supplied RIFF DLS GM bank to 16-bit stereo WAV\n",
             argv0);
 }
 
@@ -919,7 +917,7 @@ int main(int argc, char **argv) {
     const char *dls_path = argc >= 4 ? argv[3] : find_default_dls();
     uint32_t sample_rate = DEFAULT_SAMPLE_RATE;
     if (!dls_path) {
-        fprintf(stderr, "gm.dls not found; pass the path explicitly\n");
+        fprintf(stderr, "gm.dls not found in the current directory; pass the path explicitly\n");
         return 2;
     }
     if (argc >= 5) {

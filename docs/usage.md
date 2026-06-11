@@ -18,6 +18,10 @@ platform. (For one concrete embedded port, see `docs/device-integration.md`.)
 - **Footprint:** integer-only hot path; the voice/channel state is a few KB; the
   bank is a few MB and can live in read-only memory (flash, mmap, ROM).
 
+This project does **not** include `GM.DLS`, `gm.dls`, generated `gm_bank.bin`, or
+any Microsoft sound data. Bring your own legally usable RIFF DLS bank and keep
+generated banks out of public commits unless you have redistribution rights.
+
 Two layers, use whichever fits:
 
 | Layer | File | What it gives you |

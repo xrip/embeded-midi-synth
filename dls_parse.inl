@@ -1,5 +1,5 @@
 // Shared RIFF DLS parser + DLS-domain conversions.
-// Included (not linked) by both gm_dls_player.c (golden reference) and
+// Included (not linked) by both examples/gm_dls_player.c (golden reference) and
 // dls_pack.c (offline soundbank packer) so the parsing logic has a single
 // source of truth. All symbols are static; include exactly once per TU.
 #pragma once

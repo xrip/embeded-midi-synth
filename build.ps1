@@ -1,6 +1,5 @@
 param(
-    [string]$Target = 'gm_dls_player',
-    [int]$Jobs = 14,
+    [string]$Target = 'dls_pack',
     [switch]$Debug,
     [string[]]$Define = @(),   # extra preprocessor defines, e.g. -Define WT_BLOCK=8
     [string]$OutName            # override host output exe name (defaults to $Target)
@@ -10,35 +9,39 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BuildDir = Join-Path $RepoRoot 'cmake-build-rp2040'
 $StandaloneBuildDir = Join-Path $RepoRoot 'build'
 
-$CMakeExe = 'C:\Users\xr1p\AppData\Local\Programs\CLion\bin\cmake\win\x64\bin\cmake.exe'
-$ClionMingwBin = 'C:\Users\xr1p\AppData\Local\Programs\CLion\bin\mingw\bin'
-$GccExe = Join-Path $ClionMingwBin 'gcc.exe'
-
-$env:PICO_SDK_PATH = 'F:/pico-sdk'
-$env:PICOTOOL_FETCH_FROM_GIT_PATH = 'c:\temp\'
-
-if (($env:PATH -split ';') -notcontains $ClionMingwBin) {
-    $env:PATH = "$ClionMingwBin;$env:PATH"
+$GccExe = $env:CC
+if (-not $GccExe) {
+    $GccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+    if ($GccCmd) {
+        $GccExe = $GccCmd.Source
+    } else {
+        $ClionGcc = Join-Path $env:LOCALAPPDATA 'Programs\CLion\bin\mingw\bin\gcc.exe'
+        if (Test-Path $ClionGcc) {
+            $GccExe = $ClionGcc
+        } else {
+            throw "Compiler not found. Put gcc in PATH or set CC to a C compiler."
+        }
+    }
+}
+$GccDir = Split-Path -Parent $GccExe
+if ($GccDir -and (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $GccDir)) {
+    $env:PATH = "$GccDir$([IO.Path]::PathSeparator)$env:PATH"
 }
 
 $HostTargets = @{
-    'gm_dls_player'  = 'gm_dls_player.c'
+    'gm_dls_player'  = 'examples/gm_dls_player.c'
     'dls_pack'       = 'dls_pack.c'
-    'wt_render'      = 'wt_render.c'
+    'wt_render'      = 'examples/wt_render.c'
     'midi_selfcheck' = 'tools/midi_selfcheck.c'
 }
 
 if ($HostTargets.ContainsKey($Target)) {
-    if (-not (Test-Path $GccExe)) {
-        throw "Compiler not found: $GccExe"
-    }
-
     New-Item -ItemType Directory -Force -Path $StandaloneBuildDir | Out-Null
     $ExeName = if ($OutName) { $OutName } else { $Target }
-    $OutputExe = Join-Path $StandaloneBuildDir ($ExeName + '.exe')
+    $ExeSuffix = if ($env:OS -eq 'Windows_NT') { '.exe' } else { '' }
+    $OutputExe = Join-Path $StandaloneBuildDir ($ExeName + $ExeSuffix)
     $Source = Join-Path $RepoRoot $HostTargets[$Target]
 
     $CommonArgs = @(
@@ -46,6 +49,8 @@ if ($HostTargets.ContainsKey($Target)) {
         '-Wall',
         '-Wextra',
         '-Wpedantic',
+        '-Wno-unused-function',
+        '-I', $RepoRoot,
         '-o', $OutputExe,
         $Source,
         '-lm'
@@ -67,4 +72,4 @@ if ($HostTargets.ContainsKey($Target)) {
     return
 }
 
-& $CMakeExe --build $BuildDir --target $Target -j $Jobs
+throw "Unknown target '$Target'. Known targets: $($HostTargets.Keys -join ', ')"
