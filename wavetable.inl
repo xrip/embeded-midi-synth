@@ -133,6 +133,7 @@ typedef struct {
     uint32_t frame_count;
     uint32_t loop_start;
     uint32_t loop_end;        // loop_start + loop_length
+    uint32_t loop_length;
     uint8_t  looped;
 
     uint32_t frame_pos;       // integer frame index
@@ -144,6 +145,7 @@ typedef struct {
     int32_t  static_cents;    // note/fine/bend pitch offset (vibrato added on top)
 
     uint8_t  has_lfo;
+    uint8_t  modulated;       // has LFO or EG2; precomputed for the audio loop
     uint32_t lfo_phase;       // current phase (full turn = 2^32)
     uint32_t lfo_phase_inc;
     uint32_t lfo_delay;       // samples before LFO starts
@@ -169,7 +171,7 @@ typedef struct {
 
     int32_t  region_gain_q16; // baked region attenuation gain (Q16)
     int32_t  amp_q16;         // velocity * region gain * channel vol/expr (Q16)
-    int32_t  trem_amp_q16;    // amp_q16 with control-rate tremolo applied (held per block)
+    int32_t  render_amp_q16;  // amp_q16 with control-rate tremolo applied (held per block)
     int16_t  pan_l_q15;
     int16_t  pan_r_q15;
     uint32_t age;
@@ -464,6 +466,7 @@ static void wt_update_amp(wt_voice_t *v) {
     // UMULL; an int64 product would call __aeabi_lmul on the hot path).
     if (amp > GM_ONE_Q16 - 1) amp = GM_ONE_Q16 - 1;
     v->amp_q16 = (int32_t) amp;
+    if (!v->modulated) v->render_amp_q16 = (int32_t) amp;
 }
 
 static void wt_update_pitch(wt_voice_t *v) {
@@ -544,6 +547,7 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
         v->looped = 1;
         v->loop_start = rg->loop_start;
         v->loop_end = rg->loop_start + rg->loop_length;
+        v->loop_length = rg->loop_length;
     }
     v->base_step_q16 = w->base_step_q16;
     v->root = (rg->flags & GM_RGN_ROOT_FROM_NOTE) ? note : rg->root_key;
@@ -573,6 +577,7 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
             v->eg2_stage = WT_ATTACK;
         }
     }
+    v->modulated = v->has_lfo || v->has_eg2;
     wt_update_pitch(v);
     wt_update_amp(v);
 
@@ -770,7 +775,7 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
 // voices that carry an LFO or EG2). This is where the remaining int64-heavy
 // math lives — deep-vibrato LFO depth and wt_pitch_step — so amortizing it over
 // WT_BLOCK samples keeps the per-sample loop free of 64-bit multiplies and of
-// the pitch LUT. Updates v->step_q16 (held for the block) and v->trem_amp_q16
+// the pitch LUT. Updates v->step_q16 (held for the block) and v->render_amp_q16
 // (tremolo-applied amp, also held); advances the LFO phase and EG2 by one block.
 INLINE void wt_refresh_mod(wt_voice_t *v) {
     int32_t dyn_cents_q8 = 0;
@@ -801,7 +806,7 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
         dyn_cents_q8 += wt_mul_i32(v->eg2_q16, v->eg2_pitch_cents) >> 8;
         for (int k = 1; k < WT_BLOCK; ++k) wt_advance_eg2(v);
     }
-    v->trem_amp_q16 = amp;
+    v->render_amp_q16 = amp;
     v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents + dyn_cents_q8);
 }
 
@@ -815,15 +820,9 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
         if (!v->active) continue;  // env may have killed it (mask updated)
 
         // Pitch/LFO/EG2 are refreshed at control rate; the amplitude envelope
-        // (above) stays per-sample so there is no zipper. Modulated voices read
-        // the held tremolo amp; everyone else uses the live amp so CC7/CC11
-        // volume changes apply immediately.
-        int32_t amp_q16;
-        if (v->has_lfo || v->has_eg2) {
+        // (above) stays per-sample so there is no zipper.
+        if (v->modulated) {
             if ((v->samples_played & (WT_BLOCK - 1)) == 0) wt_refresh_mod(v);
-            amp_q16 = v->trem_amp_q16;
-        } else {
-            amp_q16 = v->amp_q16;
         }
         v->samples_played++;
 
@@ -851,7 +850,7 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
 
         // env<=65536, amp<=65535 -> product < 2^32 (single unsigned MUL); the
         // resulting gain<=65535, so s (<=32767) * gain stays inside int32.
-        int32_t gain = (int32_t) wt_mul_q16_u32((uint32_t) v->env_q16, (uint32_t) amp_q16); // Q16
+        int32_t gain = (int32_t) wt_mul_q16_u32((uint32_t) v->env_q16, (uint32_t) v->render_amp_q16); // Q16
         int32_t val = wt_mul_q16_i32(s, gain);
 
         l += wt_mul_q15_i32(val, v->pan_l_q15);
@@ -863,7 +862,7 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
         v->frac = acc & 0xFFFF;
 
         if (v->looped) {
-            while (v->frame_pos >= v->loop_end) v->frame_pos -= (v->loop_end - v->loop_start);
+            while (v->frame_pos >= v->loop_end) v->frame_pos -= v->loop_length;
         } else if (v->frame_pos + 1 >= v->frame_count) {
             wt_voice_kill(v);
         }
