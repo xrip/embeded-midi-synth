@@ -22,6 +22,8 @@ typedef struct midi_voice_s {
     uint8_t sustain_level;
     uint8_t attack_target;   // >0 = attack phase, target velocity
     uint8_t drum_type;       // cached GM percussion synthesis type (channel 9 only)
+    uint16_t pan_l_q8;
+    uint16_t pan_r_q8;
 
     int32_t frequency_m100;
     uint32_t phase;          // melodic oscillator phase accumulator (wraps over one period)
@@ -36,6 +38,7 @@ typedef struct midi_voice_s {
 typedef struct midi_channel_s {
     uint8_t program;
     uint8_t volume;
+    uint8_t pan;
     int32_t pitch;
 } midi_channel_t;
 
@@ -48,10 +51,10 @@ typedef struct __attribute__((packed)) {
 
 static midi_voice_t midi_voices[MAX_MIDI_VOICES] = {0};
 static midi_channel_t midi_channels[MIDI_CHANNELS] = {
-    {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0},
-    {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0},
-    {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0},
-    {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0},
+    {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0},
+    {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0},
+    {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0},
+    {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0}, {0, 100, 64, 0},
 };
 
 // Bitmask for active voices
@@ -76,6 +79,17 @@ static uint32_t noise_seed = 0x7EC80000; // Best overall for drums
 #define SET_CHANNEL_SUSTAIN(idx) (channels_sustain_bitmask |= (1U << (idx)))
 #define CLEAR_CHANNEL_SUSTAIN(idx) (channels_sustain_bitmask &= ~(1U << (idx)))
 #define IS_CHANNEL_SUSTAIN(idx) ((channels_sustain_bitmask & (1U << (idx))) != 0)
+
+#define DRUM_BODY_GAIN 96u
+#define DRUM_PUNCH_GAIN 64u
+
+#ifndef __fast_mul
+#define __fast_mul(a, b) ((a) * (b))
+#endif
+
+static INLINE int32_t sine_mul_q8_i32(int32_t a, uint16_t b) {
+    return __fast_mul(a, (int32_t) b) >> 8;
+}
 
 // bend: 0-16383, center 8192. Returns multiplier ×10000
 static INLINE int32_t calc_pitch_bend(const int bend) {
@@ -111,6 +125,14 @@ static INLINE int32_t sine_lookup(const uint32_t angle) {
 static INLINE uint32_t calc_phase_inc(const int32_t frequency_m100) {
     return (uint32_t) (((uint64_t) (uint32_t) frequency_m100 << 32) /
                        (100u * (uint32_t) SOUND_FREQUENCY));
+}
+
+static INLINE uint16_t pan_left_q8(uint8_t pan) {
+    return pan <= 64 ? 256u : (uint16_t) (((uint32_t) (127u - pan) * 256u + 31u) / 63u);
+}
+
+static INLINE uint16_t pan_right_q8(uint8_t pan) {
+    return pan >= 64 ? 256u : (uint16_t) (((uint32_t) pan * 256u + 32u) >> 6);
 }
 
 static INLINE int16_t generate_noise() {
@@ -224,11 +246,14 @@ static INLINE int32_t generate_drum_sample(midi_voice_t *voice, const uint16_t s
     return sample;
 }
 
-// Modified midi_sample function
-static INLINE int16_t midi_sample() {
-    if (__builtin_expect(!active_voice_bitmask, 0)) return 0;
+static INLINE void midi_sample_stereo(int16_t *out_l, int16_t *out_r) {
+    if (__builtin_expect(!active_voice_bitmask, 0)) {
+        *out_l = 0;
+        *out_r = 0;
+        return;
+    }
 
-    int32_t sample = 0;
+    int32_t l = 0, r = 0;
     uint32_t active_voices = active_voice_bitmask;
 
     do {
@@ -238,31 +263,20 @@ static INLINE int16_t midi_sample() {
 
         midi_voice_t *__restrict voice = &midi_voices[voice_index];
         const uint16_t sample_position = voice->sample_position++;
+        int32_t v = 0;
 
-        // Check if this is a drum channel (channel 9)
         if (voice->channel == 9) {
-            sample += generate_drum_sample(voice, sample_position);
-            // Free the slot once the exponential envelope has decayed below ~1
-            // amplitude LSB, instead of leaving a silent voice pinned until the
-            // next note-off.
+            v = generate_drum_sample(voice, sample_position);
             if (voice->drum_env < (1u << 16)) {
                 active_voice_bitmask &= ~voice_bit;
             }
         } else {
-            // Melodic synthesis with exponential envelope
-
-            // Control-rate ADSR: update the target level every 256 samples
-            // (~86 Hz), then let the audio-rate gain ramp toward it below. This
-            // keeps the state machine cheap while the per-sample interpolation
-            // removes the zipper/stepping an 8-bit 86 Hz envelope would produce.
             if (__builtin_expect((sample_position & 255) == 0 && sample_position > 0, 0)) {
                 if (voice->attack_target) {
-                    // Attack phase: rise toward target
                     voice->velocity += ((voice->attack_target - voice->velocity) >> voice->decay_shift) | 1;
                     if (voice->velocity >= voice->attack_target) {
                         voice->velocity = voice->attack_target;
                         voice->attack_target = 0;
-                        // Restore decay parameters from program table
                         const gm_envelope_t *env = &gm_envelopes[midi_channels[voice->channel].program];
                         voice->decay_shift = env->decay_shift;
                     }
@@ -272,31 +286,31 @@ static INLINE int16_t midi_sample() {
                         voice->velocity -= ((voice->velocity - target) >> voice->decay_shift) | 1;
                     }
                 }
-                // Retarget the audio-rate gain ramp at the new control value.
                 voice->gain_inc = (((int32_t) voice->velocity << 8) - voice->gain_q8) >> 8;
-                // Released and faded out -> free the slot (one ramp after silence).
                 if (voice->velocity == 0 && voice->gain_q8 < 256) {
                     active_voice_bitmask &= ~voice_bit;
                     continue;
                 }
             }
 
-            // Phase accumulator: one add per sample, no multiply/divide, and it
-            // wraps cleanly at the period boundary (no int32 overflow on high
-            // notes, no ~3 s sample_position-wrap glitch on held notes). The
-            // int16 table keeps the tone clean (no 8-bit grit), single lookup.
-            const int32_t sine_val = sine_from_index(voice->phase >> 20); // ±32512
+            const int32_t sine_val = sine_from_index(voice->phase >> 20);
             voice->phase += voice->phase_inc;
-            voice->gain_q8 += voice->gain_inc;                 // smooth, click-free gain
-            sample += __fast_mul(voice->gain_q8, sine_val) >> 16;
+            voice->gain_q8 += voice->gain_inc;
+            v = __fast_mul(voice->gain_q8, sine_val) >> 16;
         }
+
+        l += sine_mul_q8_i32(v, voice->pan_l_q8);
+        r += sine_mul_q8_i32(v, voice->pan_r_q8);
     } while (active_voices);
 
-    // Saturate instead of letting a dense mix wrap around to harsh noise.
-    sample >>= 2;
-    if (__builtin_expect(sample > 32767, 0)) sample = 32767;
-    else if (__builtin_expect(sample < -32768, 0)) sample = -32768;
-    return (int16_t) sample;
+    l >>= 2;
+    r >>= 2;
+    if (__builtin_expect(l > 32767, 0)) l = 32767;
+    else if (__builtin_expect(l < -32768, 0)) l = -32768;
+    if (__builtin_expect(r > 32767, 0)) r = 32767;
+    else if (__builtin_expect(r < -32768, 0)) r = -32768;
+    *out_l = (int16_t) l;
+    *out_r = (int16_t) r;
 }
 
 // Optimized pitch bend calculation with lookup table or approximation
@@ -344,6 +358,8 @@ static INLINE void parse_midi(const midi_command_t *message) {
                         voice->channel = channel;
                         voice->note = message->note;
                         voice->velocity_base = message->velocity;
+                        voice->pan_l_q8 = pan_left_q8(midi_channels[channel].pan);
+                        voice->pan_r_q8 = pan_right_q8(midi_channels[channel].pan);
 
                         // Cache the percussion synthesis type once (channel 9)
                         voice->drum_type = (message->note >= 35 && message->note <= 81)
@@ -365,9 +381,8 @@ static INLINE void parse_midi(const midi_command_t *message) {
                         // envelope and pick the per-type decay rate. The melodic
                         // envelope fields below are then unused for this voice.
                         if (channel == 9) {
-                            const uint32_t drum_velocity = ((uint32_t) voice->velocity * 112u) >> 7;
-                            voice->drum_env = drum_velocity << 16;       // body
-                            voice->drum_punch = drum_velocity << 16;     // +1x attack transient (2x peak)
+                            voice->drum_env = (((uint32_t) voice->velocity * DRUM_BODY_GAIN) >> 7) << 16;
+                            voice->drum_punch = (((uint32_t) voice->velocity * DRUM_PUNCH_GAIN) >> 7) << 16;
                             voice->decay_shift = drum_decay[voice->drum_type];
                             SET_ACTIVE_VOICE(voice_slot);
                             break;
@@ -444,10 +459,9 @@ static INLINE void parse_midi(const midi_command_t *message) {
                         }
                     }
                     break;
-                /*
                 case 0x0A: //  Left-right pan
+                    midi_channels[channel].pan = message->velocity & 0x7f;
                     break;
-                */
                 case 0x40: // Sustain
                     if (message->velocity & 64) {
                         SET_CHANNEL_SUSTAIN(channel);
@@ -481,8 +495,10 @@ static INLINE void parse_midi(const midi_command_t *message) {
                     break;
                 case 0x79: // all controllers off
                     memset(midi_channels, 0, sizeof(midi_channel_t) * MIDI_CHANNELS);
-                    for (int i = 0; i < MIDI_CHANNELS; i++)
+                    for (int i = 0; i < MIDI_CHANNELS; i++) {
                         midi_channels[i].volume = 100;
+                        midi_channels[i].pan = 64;
+                    }
                     break;
                 default:
                     debug_log("[MIDI] Unknown channel %i controller %02x %02x\n", channel, message->note,

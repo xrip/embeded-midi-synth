@@ -3,7 +3,7 @@
 //   sine_render <input.mid> <output.wav> [sample-rate]
 //
 // Drives the SAME engine that runs on the RP2040 (sine/general-midi.c.inl) over
-// a Standard MIDI File and writes a 16-bit mono WAV. No sound bank is needed:
+// a Standard MIDI File and writes a 16-bit stereo WAV. No sound bank is needed:
 // every voice is synthesised from the built-in sine table and noise LFSR. Used
 // to audition / validate the generator on the desktop before flashing.
 #include <stdint.h>
@@ -23,7 +23,7 @@
 #define __fast_mul(a, b) ((a) * (b)) // device maps this to a single-cycle MUL
 #include "../sine/general-midi.c.inl"
 
-// ---- minimal mono WAV writer -------------------------------------------------
+// ---- minimal stereo WAV writer -----------------------------------------------
 
 typedef struct {
     FILE *file;
@@ -43,20 +43,21 @@ static int wav_open(wav_t *w, const char *path, uint32_t rate) {
     fwrite("RIFF", 1, 4, w->file); wr_u32(w->file, 0);
     fwrite("WAVE", 1, 4, w->file);
     fwrite("fmt ", 1, 4, w->file); wr_u32(w->file, 16);
-    wr_u16(w->file, 1); wr_u16(w->file, 1);          // PCM, mono
-    wr_u32(w->file, rate); wr_u32(w->file, rate * 2u); // byte rate
-    wr_u16(w->file, 2); wr_u16(w->file, 16);          // block align, bits
+    wr_u16(w->file, 1); wr_u16(w->file, 2);          // PCM, stereo
+    wr_u32(w->file, rate); wr_u32(w->file, rate * 4u); // byte rate
+    wr_u16(w->file, 4); wr_u16(w->file, 16);          // block align, bits
     fwrite("data", 1, 4, w->file); wr_u32(w->file, 0);
     return 1;
 }
 
-static void wav_write(wav_t *w, int16_t s) {
-    wr_u16(w->file, (uint16_t) s);
+static void wav_write(wav_t *w, int16_t l, int16_t r) {
+    wr_u16(w->file, (uint16_t) l);
+    wr_u16(w->file, (uint16_t) r);
     w->frames++;
 }
 
 static int wav_close(wav_t *w) {
-    uint32_t data = w->frames * 2u;
+    uint32_t data = w->frames * 4u;
     int ok = 1;
     if (fseek(w->file, 4, SEEK_SET) != 0) ok = 0;
     wr_u32(w->file, 36u + data);
@@ -69,8 +70,11 @@ static int wav_close(wav_t *w) {
 // ---- sequencer ---------------------------------------------------------------
 
 static void render_block(wav_t *wav, uint64_t samples) {
-    for (uint64_t i = 0; i < samples; ++i)
-        wav_write(wav, midi_sample());
+    for (uint64_t i = 0; i < samples; ++i) {
+        int16_t l, r;
+        midi_sample_stereo(&l, &r);
+        wav_write(wav, l, r);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -134,7 +138,7 @@ int main(int argc, char **argv) {
     while (tail-- && active_voice_bitmask) render_block(&wav, 1);
 
     int ok = wav_close(&wav);
-    fprintf(stderr, "SINE: %u Hz mono, %u frames -> %s\n", sample_rate, wav.frames, wav_path);
+    fprintf(stderr, "SINE: %u Hz stereo, %u frames -> %s\n", sample_rate, wav.frames, wav_path);
     midi_file_free(&midi);
     return ok ? 0 : 1;
 }

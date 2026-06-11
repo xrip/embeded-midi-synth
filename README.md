@@ -91,7 +91,7 @@ Render a MIDI file through the fixed-point engine on the host:
 ```
 
 The repository also ships a tiny bank-free generator synth in `sine/` (sine
-table + noise LFSR, GM envelopes, drum map). Render it to a 16-bit mono WAV with
+table + noise LFSR, GM envelopes, drum map). Render it to a 16-bit stereo WAV with
 no sound bank at all:
 
 ```powershell
