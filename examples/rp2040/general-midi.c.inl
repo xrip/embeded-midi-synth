@@ -83,16 +83,15 @@ static void __attribute__((constructor)) gm_wavetable_init(void) {
 // Mono sink kept for the current caller: sum the stereo render back to center.
 // For true stereo + DLS pan, switch the emulator's audio mix to
 // midi_sample_stereo(&l, &r).
-static INLINE int16_t midi_sample(void) {
+static INLINE void midi_sample(int16_t samles[2]) {
     if (__builtin_expect(!wt_bank_ready, 0)) {
         wt_set_bank(gm_bank_blob);
         wt_bank_ready = 1;
     }
-    int16_t l, r;
-    midi_sample_stereo(&l, &r);
-    return (int16_t) (((int32_t) l + (int32_t) r) >> 1);
+    // int16_t l, r;
+    midi_sample_stereo(&samles[0], &samles[1]);
+    // return (int16_t) (((int32_t) l + (int32_t) r) >> 1);
 }
-
 // Hand all the wave cache's RAM back to the heap when another subsystem needs it.
 // MIDI keeps playing (voices on a RAM copy fall back to the byte-identical flash
 // PCM seamlessly; the cache re-fills on demand). No-op when the cache is compiled

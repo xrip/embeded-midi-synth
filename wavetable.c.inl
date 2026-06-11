@@ -532,7 +532,8 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     wt_voice_t *v = wt_alloc_voice();
     memset(v, 0, sizeof(*v));
     v->active = 1;
-    g_active_mask |= 1u << (uint32_t) (v - g_voices);
+    // NOTE: g_active_mask (which publishes the voice to the render) is set LAST,
+    // after every field below is written -- see the store at the end of this fn.
     v->percussion = channel == 9;
     v->channel = channel;
     v->note = note;
@@ -599,6 +600,12 @@ static void wt_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
         v->env_q16 = 0;
         v->amp_stage = WT_ATTACK;
     }
+
+    // Publish the voice only now that every field is initialized. The render
+    // (on its own thread/IRQ) iterates g_active_mask, so exposing the bit before
+    // pcm/frame_count are written let it read a NULL pcm and segfault at
+    // v->pcm[i0]. Keep this store last.
+    g_active_mask |= 1u << (uint32_t) (v - g_voices);
 }
 
 // Recompute pitch for all sounding voices on a channel (pitch bend).
