@@ -2,7 +2,7 @@
 //
 //   dls_pack <gm.dls> <out.bin> <output_rate>
 //
-// Reuses the shared DLS parser (dls_parse.inl), then bakes everything the
+// Reuses the shared DLS parser (dls_parse.c.inl), then bakes everything the
 // real-time fixed-point engine needs into a position-independent blob
 // (see gm_bank.h):
 //   * waves downmixed to mono int16 at native rate, with base playback step
@@ -11,7 +11,7 @@
 //   * instruments preserving bank/program order for dls_find_instrument()
 #include <math.h>
 
-#include "dls_parse.inl"
+#include "dls_parse.c.inl"
 #include "../gm_bank.h"
 
 // ---- growable output buffers -------------------------------------------------

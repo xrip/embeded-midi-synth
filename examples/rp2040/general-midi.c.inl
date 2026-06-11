@@ -4,11 +4,11 @@
 // General MIDI synthesizer — GM.DLS fixed-point wavetable engine.
 //
 // Replaces the old synthesized voices (sine + LFSR noise) with the real GM.DLS
-// wavetable bank. All the DSP lives in wavetable.inl (float-free, Cortex-M0+
+// wavetable bank. All the DSP lives in wavetable.c.inl (float-free, Cortex-M0+
 // tuned: no int64/division on the per-sample path, baked LUTs, voice bitmask).
 // This file is only the glue mpu401.c.inl / the emulator expect:
 //
-//   * void    parse_midi(const midi_command_t *)   - from wavetable.inl
+//   * void    parse_midi(const midi_command_t *)   - from wavetable.c.inl
 //   * int16_t midi_sample(void)                     - mono wrapper, defined here
 //
 // Provided by the includer (emulator.h): INLINE, and optionally
@@ -37,9 +37,9 @@
 // the heap is full — RAM use scales with the live working set, no fixed
 // reservation. Host A/B on Doom/omf/dott: ~90%+ of per-sample reads from RAM,
 // bit-exact. Build with -DWT_NO_WAVE_CACHE to compile it out entirely (no malloc)
-// on targets with no spare RAM. See wavetable.inl / docs/device-integration.md.
+// on targets with no spare RAM. See wavetable.c.inl / docs/device-integration.md.
 
-// wavetable.inl marks its functions `INLINE foo` expecting INLINE == `static
+// wavetable.c.inl marks its functions `INLINE foo` expecting INLINE == `static
 // inline`. The emulator's INLINE is just `inline` (its code writes `static
 // INLINE`), which would give wavetable external-linkage inlines. Bridge it for
 // the wavetable include only, then restore the emulator's INLINE so the rest of
@@ -47,7 +47,7 @@
 #pragma push_macro("INLINE")
 #undef INLINE
 #define INLINE static inline
-#include "../../wavetable.inl"   // parse_midi, midi_sample_stereo, wt_set_bank, midi_command_t
+#include "../../wavetable.c.inl"   // parse_midi, midi_sample_stereo, wt_set_bank, midi_command_t
 #pragma pop_macro("INLINE")
 
 // Embed the packed soundbank in flash via inline-asm .incbin. Generate it first

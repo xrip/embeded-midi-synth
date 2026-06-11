@@ -26,7 +26,7 @@ Two layers, use whichever fits:
 
 | Layer | File | What it gives you |
 |-------|------|-------------------|
-| **Engine** | `wavetable.inl` | The synth itself: `parse_midi`, `midi_sample_stereo`, bank binding. Portable, no platform assumptions. |
+| **Engine** | `wavetable.c.inl` | The synth itself: `parse_midi`, `midi_sample_stereo`, bank binding. Portable, no platform assumptions. |
 | **Glue (optional)** | `examples/rp2040/general-midi.c.inl` | A ready-made wrapper: embeds the bank, adapts naming, runs init, and exposes a mono `midi_sample()` + a `midi_cache_release()`. A convenience/example, not required. |
 
 ---
@@ -100,7 +100,7 @@ Before the include you must provide:
 |-------|---------|
 | `INLINE` | How the engine should mark its functions, e.g. `#define INLINE static inline`. |
 | `SOUND_FREQUENCY` | Your output sample rate (part of the include contract). The engine renders at the **bank's** rate and does not resample, so pack the bank at this same rate. |
-| `#include "gm_bank.h"` | The bank format/types (include it before `wavetable.inl`). |
+| `#include "gm_bank.h"` | The bank format/types (include it before `wavetable.c.inl`). |
 
 Minimal, fully platform-agnostic integration:
 
@@ -110,7 +110,7 @@ Minimal, fully platform-agnostic integration:
 
 #define INLINE          static inline
 #define SOUND_FREQUENCY 22050        /* must match the bank's packed rate */
-#include "wavetable.inl"
+#include "wavetable.c.inl"
 
 /* --- call these from your application --- */
 
@@ -143,7 +143,7 @@ synth, expose small non-static wrappers from this file (exactly what
 
 ## 5. Public interface
 
-All declared by `wavetable.inl` (in the including TU):
+All declared by `wavetable.c.inl` (in the including TU):
 
 | Function | Purpose |
 |----------|---------|
@@ -288,7 +288,7 @@ yield.
 1. `dls_pack gm.dls gm_bank.bin <rate>` — pack the bank for your output rate.
 2. Get the blob into memory; optionally validate with `gm_bank_view`.
 3. In one source file: define `INLINE`, `SOUND_FREQUENCY`, include `gm_bank.h`
-   then `wavetable.inl`.
+   then `wavetable.c.inl`.
 4. `wt_set_bank(blob)` once.
 5. `parse_midi(&msg)` for every channel-voice message.
 6. `midi_sample_stereo(&l, &r)` once per output frame → your audio sink.

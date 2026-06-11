@@ -2,7 +2,7 @@
 
 Execute this in the emulator repo by copy/adapting
 `examples/rp2040/general-midi.c.inl` alongside the I2S/DMA and CMake integration.
-The host side (wavetable.inl, gm_bank.bin, dls_pack) is done and A/B-validated.
+The host side (wavetable.c.inl, gm_bank.bin, dls_pack) is done and A/B-validated.
 
 ## Premise (why this list is short)
 
@@ -21,7 +21,7 @@ render code from cache and vice-versa. Moving code to RAM removes that contentio
 
 `examples/rp2040/general-midi.c.inl` drives the wavetable engine and keeps the
 existing `mpu401.c.inl` contract: `parse_midi(midi_command_t*)` (from
-wavetable.inl) and a mono `int16_t midi_sample(void)` wrapper over
+wavetable.c.inl) and a mono `int16_t midi_sample(void)` wrapper over
 `midi_sample_stereo`. It also RAM-places the hot path (Step 2) and binds the bank
 via a `constructor` + lazy-init. It needs nothing from the emulator beyond
 `INLINE` (and, optionally, `__not_in_flash_func`), both of which emulator.h
@@ -53,7 +53,7 @@ define `WT_BANK_EXTERN` before the include and provide `gm_bank_blob` yourself.
 Sanity: it should sound like the host `examples/wt_render.c` output (mono sum).
 
 Notes:
-- `midi_command_t` is supplied by wavetable.inl (command/note/velocity/other),
+- `midi_command_t` is supplied by wavetable.c.inl (command/note/velocity/other),
   matching the `uint32` `examples/rp2040/mpu401.c.inl` casts. If the emulator defines its own,
   set `WT_MIDI_COMMAND_T_DEFINED` and match the layout.
 - Rate: the engine does not resample, so pitch/tempo are correct only when the
@@ -105,7 +105,7 @@ Decision gates:
 
 ## Step 4 — RAM wave cache (IMPLEMENTED, on by default)
 
-`wavetable.inl` keeps one pointer per `wave_index`: the first time a **looped**
+`wavetable.c.inl` keeps one pointer per `wave_index`: the first time a **looped**
 wave plays it `malloc`s a RAM copy, stores the pointer and reads from RAM ever
 after, so the two per-sample `pcm[]` reads hit RAM instead of XIP flash. It is
 **opportunistic with no budget** — it caches as many waves as fit in the heap
@@ -206,5 +206,5 @@ Still device-conditional, if Step 3 shows pressure even with the cache:
 
 `midi_render_block(int16_t *buf, int frames)` — fill an interleaved stereo buffer
 in one call instead of per-sample. Better register/cache locality and matches how
-DMA-fed I2S consumes audio. Can be added to wavetable.inl now and A/B-checked on
+DMA-fed I2S consumes audio. Can be added to wavetable.c.inl now and A/B-checked on
 the host (must stay bit-exact vs per-sample `midi_sample_stereo`).

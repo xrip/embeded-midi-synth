@@ -3,15 +3,15 @@
 //   wt_render <input.mid> <output.wav> <gm_bank.bin> [sample-rate]
 //
 // Loads the packed soundbank, drives the SAME engine that targets the RP2040
-// (wavetable.inl) over a Standard MIDI File, and writes 16-bit stereo WAV. Used
+// (wavetable.c.inl) over a Standard MIDI File, and writes 16-bit stereo WAV. Used
 // to validate the fixed-point engine on the desktop before flashing.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../tools/dls_parse.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
-#include "smf_parse.inl"            // midi_file_t, midi_file_load
+#include "../tools/dls_parse.c.inl"   // file_blob_t, read_entire_file, rd_*, fourcc_is
+#include "smf_parse.c.inl"            // midi_file_t, midi_file_load
 #include "../gm_bank.h"
 
 #define INLINE static inline
@@ -19,7 +19,7 @@
 #define SOUND_FREQUENCY 22050   // GM.DLS samples are natively 22050 Hz
 #endif
 #define WT_MAX_VOICES 32   // match the RP2040 target so A/B stealing is identical
-#include "../wavetable.inl"
+#include "../wavetable.c.inl"
 
 // ---- minimal WAV writer ------------------------------------------------------
 

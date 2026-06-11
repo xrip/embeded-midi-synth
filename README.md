@@ -26,7 +26,7 @@ plain single-translation-unit C and only needs a pointer to a packed bank blob.
 
 | Path | Purpose |
 |------|---------|
-| `wavetable.inl` | Fixed-point MIDI wavetable engine. Include this in one C translation unit. |
+| `wavetable.c.inl` | Fixed-point MIDI wavetable engine. Include this in one C translation unit. |
 | `gm_bank.h` | Packed bank format and validation helper. |
 | `wt_luts.h` | Baked lookup tables used by the fixed-point engine. |
 | `tools/dls_pack.c` | Host tool: converts a RIFF DLS bank into the packed runtime blob. |
@@ -86,7 +86,7 @@ At runtime, bind the packed bank once and feed MIDI channel-voice messages:
 
 #define INLINE static inline
 #define SOUND_FREQUENCY 22050
-#include "wavetable.inl"
+#include "wavetable.c.inl"
 
 void synth_init(const void *bank_blob) {
     wt_set_bank(bank_blob);

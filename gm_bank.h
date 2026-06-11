@@ -1,5 +1,5 @@
 // On-flash GM wavetable soundbank format, shared by the offline packer
-// (tools/dls_pack.c, writes it) and the real-time engine (wavetable.inl, reads
+// (tools/dls_pack.c, writes it) and the real-time engine (wavetable.c.inl, reads
 // it directly from flash via XIP).
 //
 // Design constraints:
@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 // DLS drum-kit marker in gm_instrument_t.bank (high bit). Defined here so the
-// real-time engine needs only gm_bank.h, not the host RIFF parser; tools/dls_parse.inl
+// real-time engine needs only gm_bank.h, not the host RIFF parser; tools/dls_parse.c.inl
 // defines the same value, which is a harmless identical redefinition.
 #ifndef DLS_DRUM_BANK
 #define DLS_DRUM_BANK 0x80000000u

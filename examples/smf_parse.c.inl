@@ -2,7 +2,7 @@
 // tick-sorted event stream. Used by the host render harness
 // (examples/wt_render.c) to drive the packed wavetable engine.
 //
-// Requires tools/dls_parse.inl to be included first (uses file_blob_t,
+// Requires tools/dls_parse.c.inl to be included first (uses file_blob_t,
 // read_entire_file, free_file_blob, fourcc_is, rd_u16be, rd_u32be).
 #pragma once
 
