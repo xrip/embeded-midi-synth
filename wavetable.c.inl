@@ -78,12 +78,12 @@ static inline int32_t wt_lerp_q15_i32(int32_t a, int32_t b, uint32_t frac_q16) {
 #ifndef WT_MAX_VOICES
 #define WT_MAX_VOICES 32
 #endif
-// Control rate: the int64-heavy pitch/LFO/EG2 modulation is refreshed once per
-// WT_BLOCK output samples instead of per sample (only for voices that carry an
-// LFO or EG2). Must be a power of two. 8 @ 22050 Hz ~= 2.8 kHz, far above any
-// vibrato/tremolo rate, so the held pitch step only adds sub-cent phase drift
-// (A/B vs per-sample: <= -42 dBFS on the worst real track); the amplitude
-// envelope still runs per sample, so there is no zipper.
+// Control rate: the pitch-LUT / division-heavy pitch/LFO/EG2 modulation is
+// refreshed once per WT_BLOCK output samples instead of per sample (only for
+// voices that carry an LFO or EG2). Must be a power of two. 8 @ 22050 Hz ~= 2.8
+// kHz, far above any vibrato/tremolo rate, so the held pitch step only adds
+// sub-cent phase drift (A/B vs per-sample: <= -42 dBFS on the worst real track);
+// the amplitude envelope still runs per sample, so there is no zipper.
 #ifndef WT_BLOCK
 #define WT_BLOCK 8
 #endif
@@ -785,11 +785,12 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
 }
 
 // Control-rate modulation refresh (runs once per WT_BLOCK samples, only for
-// voices that carry an LFO or EG2). This is where the remaining int64-heavy
-// math lives — deep-vibrato LFO depth and wt_pitch_step — so amortizing it over
-// WT_BLOCK samples keeps the per-sample loop free of 64-bit multiplies and of
-// the pitch LUT. Updates v->step_q16 (held for the block) and v->render_amp_q16
-// (tremolo-applied amp, also held); advances the LFO phase and EG2 by one block.
+// voices that carry an LFO or EG2). This is where the heaviest math lives —
+// deep-vibrato LFO depth and wt_pitch_step (a division plus an interpolated LUT
+// lookup) — so amortizing it over WT_BLOCK samples keeps the per-sample loop
+// free of the pitch LUT. Updates v->step_q16 (held for the block) and
+// v->render_amp_q16 (tremolo-applied amp, also held); advances the LFO phase and
+// EG2 by one block.
 INLINE void wt_refresh_mod(wt_voice_t *v) {
     int32_t dyn_cents_q8 = 0;
     int32_t amp = v->amp_q16;
