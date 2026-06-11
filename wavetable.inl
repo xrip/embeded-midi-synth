@@ -46,6 +46,10 @@
 #define WT_RAMFUNC(name) name
 #endif
 
+#ifndef __fast_mul
+#define __fast_mul(a, b) ((a) * (b))
+#endif
+
 #ifndef WT_MAX_VOICES
 #define WT_MAX_VOICES 32
 #endif
@@ -181,7 +185,7 @@ static const uint8_t g_ctz32[32] = {
     31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9,
 };
 static inline int wt_ctz32(uint32_t x) {  // x must be non-zero
-    return g_ctz32[((x & (0u - x)) * 0x077CB531u) >> 27];
+    return g_ctz32[((uint32_t) __fast_mul((x & (0u - x)), 0x077CB531u)) >> 27];
 }
 
 // ---- RAM wave cache (note-on only; see the configuration block above) --------
@@ -378,7 +382,8 @@ static const gm_region_t *wt_find_region(const gm_instrument_t *ins, uint8_t not
 static inline uint32_t wt_mulshift16(uint32_t a, uint32_t b) {
     uint32_t alo = a & 0xFFFFu, ahi = a >> 16;
     uint32_t blo = b & 0xFFFFu, bhi = b >> 16;
-    return ((ahi * bhi) << 16) + ahi * blo + alo * bhi + ((alo * blo) >> 16);
+    return (__fast_mul(ahi, bhi) << 16) + __fast_mul(ahi, blo) +
+           __fast_mul(alo, bhi) + (__fast_mul(alo, blo) >> 16);
 }
 
 // Pitch factor for a cents offset given in Q8 (cents*256), with sub-cent
@@ -395,7 +400,7 @@ static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents_q8) {
     uint32_t f0 = g_pow2_cents_q16[idx];
     uint32_t f1 = idx < 1199 ? g_pow2_cents_q16[idx + 1] : (g_pow2_cents_q16[0] << 1); // 2^1
     // f1-f0 <= ~76 within one octave, so this blend fits a 32-bit product.
-    uint32_t f = f0 + (((f1 - f0) * frac) >> 8);
+    uint32_t f = f0 + (__fast_mul((f1 - f0), frac) >> 8);
     if (oct > 8) oct = 8;
     if (oct < -8) oct = -8;
     if (oct >= 0) f <<= oct; else f >>= (-oct);
@@ -410,7 +415,7 @@ static uint32_t wt_pitch_step(uint32_t base_step_q16, int total_cents_q8) {
 // Pitch-bend contribution in Q8 cents. range_cents is integer cents.
 static int wt_channel_bend_cents_q8(const wt_channel_t *ch) {
     // (bend-8192)/8192 * range, in Q8: == (bend-8192)*range_cents*256/8192.
-    return (ch->pitch_bend - 8192) * ch->bend_range_cents / 32;
+    return __fast_mul((ch->pitch_bend - 8192), ch->bend_range_cents) / 32;
 }
 
 static int wt_rpn_is_bend_range(const wt_channel_t *ch) {
@@ -438,7 +443,7 @@ static void wt_update_amp(wt_voice_t *v) {
 
 static void wt_update_pitch(wt_voice_t *v) {
     // static pitch offset in Q8 cents; vibrato is added on top in the render loop.
-    v->static_cents = ((v->note - v->root) * 100 + v->fine_cents) * 256
+    v->static_cents = (__fast_mul((v->note - v->root), 100) + v->fine_cents) * 256
                       + wt_channel_bend_cents_q8(&g_channels[v->channel]);
     v->step_q16 = wt_pitch_step(v->base_step_q16, v->static_cents);
 }
@@ -689,7 +694,7 @@ INLINE void wt_advance_env(wt_voice_t *v) {
             // DLS decay: linear-in-dB ramp (constant per-sample multiplier)
             // that clamps at the sustain level. env<=65536 and coef<65536, so
             // the product is < 2^32 and fits a single unsigned 32x32->32 MUL.
-            v->env_q16 = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) v->decay_coef_q16) >> 16);
+            v->env_q16 = (int32_t) (__fast_mul((uint32_t) v->env_q16, (uint32_t) v->decay_coef_q16) >> 16);
             if (v->env_q16 <= v->sustain_q16) {
                 v->env_q16 = v->sustain_q16;
                 v->amp_stage = WT_SUSTAIN;
@@ -701,7 +706,7 @@ INLINE void wt_advance_env(wt_voice_t *v) {
             if (v->sustain_q16 < 8) wt_voice_kill(v);
             break;
         case WT_RELEASE:
-            v->env_q16 = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) v->release_coef_q16) >> 16);
+            v->env_q16 = (int32_t) (__fast_mul((uint32_t) v->env_q16, (uint32_t) v->release_coef_q16) >> 16);
             if (v->env_q16 < 6) wt_voice_kill(v);
             break;
         default: break;
@@ -721,7 +726,7 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
             break;
         case WT_DECAY:
             // Same linear-in-dB ramp as EG1, clamped at the EG2 sustain level.
-            v->eg2_q16 = (int32_t) (((uint32_t) v->eg2_q16 * (uint32_t) v->eg2_decay_coef_q16) >> 16);
+            v->eg2_q16 = (int32_t) (__fast_mul((uint32_t) v->eg2_q16, (uint32_t) v->eg2_decay_coef_q16) >> 16);
             if (v->eg2_q16 <= v->eg2_sustain_q16) {
                 v->eg2_q16 = v->eg2_sustain_q16;
                 v->eg2_stage = WT_SUSTAIN;
@@ -730,7 +735,7 @@ INLINE void wt_advance_eg2(wt_voice_t *v) {
         case WT_SUSTAIN:
             break;
         case WT_RELEASE:
-            v->eg2_q16 = (int32_t) (((uint32_t) v->eg2_q16 * (uint32_t) v->eg2_release_coef_q16) >> 16);
+            v->eg2_q16 = (int32_t) (__fast_mul((uint32_t) v->eg2_q16, (uint32_t) v->eg2_release_coef_q16) >> 16);
             break;
         default: break;
     }
@@ -749,15 +754,15 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
         int32_t s = g_sin_q15[v->lfo_phase >> (32 - WT_SIN_BITS)];
         // mod-depth (<=185600) * modulation (<=127) fits int32.
         int32_t depth_q8 = v->lfo_depth_q8 +
-                           (v->lfo_mod_depth_q8 * (int32_t) g_channels[v->channel].modulation) / 127;
+                           __fast_mul(v->lfo_mod_depth_q8, (int32_t) g_channels[v->channel].modulation) / 127;
         // s*depth_q8 (depth up to ~725 cents -> 185600) can exceed 2^31, so drop
         // depth to Q4 (1/16-cent steps, inaudible): s (<=32767) * depth>>4
         // (<=~23200) stays in int32. This removes the last 64-bit mul -- the era
         // hardware never did wide vibrato math either. Same Q8-cents result.
-        if (depth_q8) dyn_cents_q8 += (s * (depth_q8 >> 4)) >> 11;
+        if (depth_q8) dyn_cents_q8 += __fast_mul(s, (depth_q8 >> 4)) >> 11;
         if (v->trem_depth_q8) {
             // Tremolo: gain factor 2^(c/1200) via the pitch LUT applied to amp.
-            int32_t gain_cents_q8 = (s * v->trem_depth_q8) >> 15;
+            int32_t gain_cents_q8 = __fast_mul(s, v->trem_depth_q8) >> 15;
             amp = (int32_t) wt_pitch_step((uint32_t) v->amp_q16, gain_cents_q8);
             if (amp > GM_ONE_Q16 - 1) amp = GM_ONE_Q16 - 1; // keep s*gain in int32
         }
@@ -768,7 +773,7 @@ INLINE void wt_refresh_mod(wt_voice_t *v) {
         // held value is the post-advance EG2), then finish the block.
         wt_advance_eg2(v);
         // level Q16 (<=65536) * cents (<=1200) -> Q8 cents, fits int32.
-        dyn_cents_q8 += (v->eg2_q16 * v->eg2_pitch_cents) >> 8;
+        dyn_cents_q8 += __fast_mul(v->eg2_q16, v->eg2_pitch_cents) >> 8;
         for (int k = 1; k < WT_BLOCK; ++k) wt_advance_eg2(v);
     }
     v->trem_amp_q16 = amp;
@@ -817,15 +822,15 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
         int32_t s0 = v->pcm[i0];
         uint32_t i1 = i0 + 1;
         int32_t s1 = (i1 < v->frame_count) ? v->pcm[i1] : s0;
-        int32_t s = s0 + (((s1 - s0) * (int32_t) (v->frac >> 1)) >> 15);
+        int32_t s = s0 + (__fast_mul((s1 - s0), (int32_t) (v->frac >> 1)) >> 15);
 
         // env<=65536, amp<=65535 -> product < 2^32 (single unsigned MUL); the
         // resulting gain<=65535, so s (<=32767) * gain stays inside int32.
-        int32_t gain = (int32_t) (((uint32_t) v->env_q16 * (uint32_t) amp_q16) >> 16); // Q16
-        int32_t val = (s * gain) >> 16;
+        int32_t gain = (int32_t) (__fast_mul((uint32_t) v->env_q16, (uint32_t) amp_q16) >> 16); // Q16
+        int32_t val = __fast_mul(s, gain) >> 16;
 
-        l += (val * v->pan_l_q15) >> 15;
-        r += (val * v->pan_r_q15) >> 15;
+        l += __fast_mul(val, v->pan_l_q15) >> 15;
+        r += __fast_mul(val, v->pan_r_q15) >> 15;
 
         // Advance position.
         uint32_t acc = v->frac + (v->step_q16 & 0xFFFF);
@@ -845,8 +850,8 @@ INLINE void WT_RAMFUNC(midi_sample_stereo)(int16_t *out_l, int16_t *out_r) {
     // int16 range, so no post-clamp is needed.
     if (l > 72818) l = 72818; else if (l < -72818) l = -72818;
     if (r > 72818) r = 72818; else if (r < -72818) r = -72818;
-    *out_l = (int16_t) ((l * 29491) >> 16);
-    *out_r = (int16_t) ((r * 29491) >> 16);
+    *out_l = (int16_t) (__fast_mul(l, 29491) >> 16);
+    *out_r = (int16_t) (__fast_mul(r, 29491) >> 16);
 }
 
 INLINE int wt_has_active_voices(void) {
